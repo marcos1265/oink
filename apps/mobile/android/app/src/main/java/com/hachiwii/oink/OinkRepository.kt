@@ -763,10 +763,6 @@ class OinkRepository(private val context: Context) {
         bridge.setEchoCancellation(enabled)
         mutableState.update { it.copy(audioSettings = bridge.audioSettings()) }
     }
-    fun setLowLatencyAudio(enabled: Boolean) {
-        settings.lowLatencyAudio = enabled
-        audioOwner?.setLowLatencyOutput(enabled)
-    }
     fun refreshCacheBytes() = scope.launch {
         runCatching { history().cachedBytes() }.onSuccess { bytes -> mutableState.update { it.copy(cacheBytes = bytes) } }
             .onFailure { fail(it.oinkMessage ?: "无法统计缓存") }

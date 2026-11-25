@@ -85,10 +85,6 @@ class L10nTest {
         assertEquals("MyPC 出力音量", L10n.translate("MyPC 输出音量", AppLang.JA))
         assertEquals("MyPC 출력 음량", L10n.translate("MyPC 输出音量", AppLang.KO))
 
-        assertEquals("Low-latency audio", L10n.translate("低延迟音频", AppLang.EN))
-        assertEquals("低遅延オーディオ", L10n.translate("低延迟音频", AppLang.JA))
-        assertEquals("저지연 오디오", L10n.translate("低延迟音频", AppLang.KO))
-
         assertEquals("Peer lacks capability: audio", L10n.translate("对端缺少能力：audio", AppLang.EN))
         assertEquals("相手側に必要な機能がありません：audio", L10n.translate("对端缺少能力：audio", AppLang.JA))
         assertEquals("상대방에게 필요한 기능이 없음: audio", L10n.translate("对端缺少能力：audio", AppLang.KO))

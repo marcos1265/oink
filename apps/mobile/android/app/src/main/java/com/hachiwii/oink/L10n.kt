@@ -1313,8 +1313,6 @@ object L10n {
         "还没有下载完成" to "Download not finished yet",
         "无法打开" to "Could not open",
         "此设备未提供状态" to "No status reported by this device",
-        "低延迟音频" to "Low-latency audio",
-        "优先最低延迟；关闭时使用标准媒体通道以匹配系统音量并更省电" to "Prioritize minimal latency; turn off to match system media loudness and save battery",
     )
 
     internal val JA_MAP: Map<String, String> = mapOf(
@@ -2014,8 +2012,6 @@ object L10n {
         "还没有下载完成" to "ダウンロードがまだ完了していません",
         "无法打开" to "開けません",
         "此设备未提供状态" to "このデバイスから状態が報告されていません",
-        "低延迟音频" to "低遅延オーディオ",
-        "优先最低延迟；关闭时使用标准媒体通道以匹配系统音量并更省电" to "最小遅延を優先します。オフにすると標準メディア経路を使い、システム音量に一致して省電力になります",
     )
 
     internal val KO_MAP: Map<String, String> = mapOf(
@@ -2715,7 +2711,5 @@ object L10n {
         "还没有下载完成" to "아직 다운로드가 완료되지 않았습니다",
         "无法打开" to "열 수 없음",
         "此设备未提供状态" to "이 기기에서 상태를 제공하지 않음",
-        "低延迟音频" to "저지연 오디오",
-        "优先最低延迟；关闭时使用标准媒体通道以匹配系统音量并更省电" to "최소 지연을 우선합니다. 끄면 표준 미디어 경로를 사용해 시스템 음량에 맞추고 배터리를 절약합니다",
     )
 }

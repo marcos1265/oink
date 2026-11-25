@@ -324,7 +324,6 @@ private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheB
         ValueRow("麦克风自动关闭", if (audio) optionLabel("micAutoOff", "${prefs.micAutoOff}") else "连接就绪后可修改", first = prefs.privileged != "on", disabled = !audio) { pick("micAutoOff") }
         ValueRow("扬声器自动关闭", if (audio) optionLabel("speakerAutoOff", "${prefs.speakerAutoOff}") else "连接就绪后可修改", disabled = !audio) { pick("speakerAutoOff") }
         SwitchRow("回声消除", "消除麦克风录制的本机播放的音频", prefs.echoCancel, disabled = !audio, onChange = { set(prefs.copy(echoCancel = it)) })
-        SwitchRow("低延迟音频", "优先最低延迟；关闭时使用标准媒体通道以匹配系统音量并更省电", prefs.lowLatencyAudio, onChange = { set(prefs.copy(lowLatencyAudio = it)) })
     }
     Section("通知与后台", "在控制中心编辑开关，可以添加 Oink 的「复制」「粘贴」「接收音频」「音频转发」「共享麦克风」。", id = "system") {
         SwitchRow("常驻通知", if (model.worksInBackground) "在通知栏显示在线设备和音频状态" else "已关闭：离开 Oink 后，Oink 将无法在后台工作",

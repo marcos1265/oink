@@ -40,7 +40,6 @@ class MobileAudioOwner(
     private val exclusive = booleanArrayOf(false, true)
     private val kinds = listOf(MobileMediaKind.SPEAKER, MobileMediaKind.MICROPHONE, MobileMediaKind.FORWARD)
     private var subscription: MobileMediaSubscription? = null
-    @Volatile private var lowLatencyOutput = com.hachiwii.oink.LocalSettings(this.context).lowLatencyAudio
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
     private val exitVolume = SystemExitVolume(audioManager, attributes)
@@ -140,13 +139,6 @@ class MobileAudioOwner(
         if (enabled) media.clearFailure(kind)
         media.setEnabled(kind, enabled)
     }
-    fun setLowLatencyOutput(enabled: Boolean) {
-        if (lowLatencyOutput == enabled) return
-        lowLatencyOutput = enabled
-        scope.launch {
-            if (handles[0] != 0L) media.requestRebuildResources(1u)
-        }
-    }
     /**
      * Adds the audio foreground types of [resources] (1 playback, 2 microphone) to the connection
      * service, Oink's one foreground service (user 2026-11-11). Without the persistent notification
@@ -213,7 +205,7 @@ class MobileAudioOwner(
             }
             if (!media.claimStart(kind, generation)) continue
             generations[index] = generation
-            val handle = withContext(Dispatchers.IO) { native[index].open(index == 1, generation.toLong(), exclusive[index], lowLatencyOutput) }
+            val handle = withContext(Dispatchers.IO) { native[index].open(index == 1, generation.toLong(), exclusive[index]) }
             handles[index] = handle
             val attached = handle != 0L && media.attachAudio(kind, generation, native[index].address(handle).toULong())
             val started = attached && withContext(Dispatchers.IO) { native[index].start(handle) == 0 }

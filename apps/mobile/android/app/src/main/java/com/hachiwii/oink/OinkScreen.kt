@@ -131,7 +131,6 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
         if (next.micAutoOff != old.micAutoOff) repository.setAudioIdleTimeout(uniffi.oink_mobile_ffi.MobileMediaKind.MICROPHONE, AudioTimeout.fromMinutes(next.micAutoOff))
         if (next.speakerAutoOff != old.speakerAutoOff) repository.setAudioIdleTimeout(uniffi.oink_mobile_ffi.MobileMediaKind.SPEAKER, AudioTimeout.fromMinutes(next.speakerAutoOff))
         if (next.echoCancel != old.echoCancel) repository.setEchoCancellation(next.echoCancel)
-        if (next.lowLatencyAudio != old.lowLatencyAudio) repository.setLowLatencyAudio(next.lowLatencyAudio)
         if (next.persistentNotice != old.persistentNotice) repository.setPersistentNotification(next.persistentNotice)
         if (next.noticeTap != old.noticeTap) repository.setNoticeTap(if (next.noticeTap == "open") NoticeTap.OPEN else NoticeTap.COPY)
         if (next.noticeTab != old.noticeTab) repository.setNoticeTab(HomeTab.entries[next.noticeTab.ordinal])
@@ -501,7 +500,7 @@ private fun groupKey(g: OpenFileGroup) = when (g) {
 private fun loadPrefs(s: LocalSettings) = Prefs(
     accent = Accent.of(s.themeColor), scheme = s.themeMode, language = s.language, homeTab = Tab.entries[s.homeTab.ordinal],
     autoWriteClipboard = s.autoWriteClipboard, autoReadClipboard = s.autoReadClipboard,
-    speakerTap = s.speakerTap, lowLatencyAudio = s.lowLatencyAudio,
+    speakerTap = s.speakerTap,
     persistentNotice = s.persistentNotification, hideRecents = s.hideInRecents, openWith = s.openFiles,
     noticeTap = if (s.noticeTap == NoticeTap.OPEN) "open" else "copy", noticeTab = Tab.entries[s.noticeTab.ordinal],
     openWithGroups = OpenFileGroup.entries.associate { groupKey(it) to s.selected(it) }, autoRecover = s.autoRecover,

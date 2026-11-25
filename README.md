@@ -22,7 +22,7 @@ Oink, short for "Oink Is Not only a KVM", is modern software that builds a peer-
   - **Service & Compatibility Updates**: Refined Windows background service startup handling/visibility and extended local clipboard & compatibility controls.
 - **Android**:
   - **Multi-Language Support**: Full runtime localization in English, Simplified Chinese, Japanese, and Korean across the app, Settings, persistent notifications, Quick Settings tiles, and error toasts (with shorter, deduplicated, tap-to-dismiss toasts).
-  - **Audio Output & Battery**: Removed exclusive audio-focus locking so Oink mixes smoothly with other media apps without getting stuck unavailable, switched default speaker output to Android's standard shared media pipeline (`DEEP_BUFFER` / 16-bit PCM) to match native system media loudness and reduce power draw, added a **Low-latency audio** toggle in Settings, and scoped high-performance Wi-Fi locks strictly to active audio streaming.
+  - **Audio Output & Battery**: Removed exclusive audio-focus locking and switched speaker output to shared low-latency mode (`AAUDIO_SHARING_MODE_SHARED`) so Oink mixes smoothly with other media apps without getting locked unavailable, added one-tap speaker recovery from failed states, and scoped high-performance Wi-Fi locks strictly to active audio streaming.
   - **Navigation, Lifecycle & Controls**: Added an explicit **Quit Oink** action in Settings and the persistent notification, preserved Transfer scroll state across smooth tab transitions, and added an optional customizable on-screen button overlay with profiles, hold/toggle actions, and keyboard/mouse bindings on the Control page.
 
 ## Install
