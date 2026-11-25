@@ -1076,7 +1076,14 @@ impl Service {
                 tracing::warn!(code = code as u32, "cloud file disconnect failed");
             }
         }
-        // Registration and fully hydrated pinned files outlive this backend.
+        if oink_foundation::paths::is_portable_mode() {
+            // SAFETY: self.root is a nul-terminated UTF-16 path only for this call.
+            let code = unsafe { (self.api.unregister)(wide(&self.root).as_ptr()) };
+            if code < 0 {
+                tracing::warn!(code = code as u32, "portable cloud sync root unregister failed");
+            }
+        }
+        // Registration and fully hydrated pinned files outlive this backend (unless portable).
         let mut journal = self.received.lock().unwrap();
         for node in journal.deliveries.values_mut().flatten() {
             node.life.resume_at(crate::received::now());

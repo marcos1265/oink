@@ -3540,3 +3540,55 @@ fn only_injected_remote_captured_input_marks_keyboard_mouse_use() {
     // Untimed input is never a peer's capture (router-made releases and syncs).
     assert!(captured(|| h.driver.message(peer(), Message::Input(key(false)))).is_empty());
 }
+
+#[test]
+fn relative_capture_syncs_with_mouse_disabled_and_focus_return() {
+    use oink_display::layout::OwnerLayoutPreferences;
+    let mut h = Harness::new();
+    let (mut read, _) = h.outbound(1);
+    let (writer, _) = h.inbound(1);
+    opening(&writer, &remote(), true);
+    h.attach();
+    drain(&mut read);
+    let local = h.driver.local;
+    let layout = fixture_layout(local);
+    let owners = [(peer(), OwnerLayoutPreferences::default())].into();
+    h.driver
+        .adapter
+        .router_mut()
+        .set_layout(Arc::new(oink_routing::TopologyLayout::from_layout(&layout, &owners)));
+    h.driver.command(InputCommand::MovePointerTo(peer(), None));
+    assert_eq!(h.driver.adapter.router().focus().holder, peer());
+
+    let epoch = h.driver.adapter.router().focus().epoch;
+    h.driver.message(
+        peer(),
+        Message::Control(ControlMsg::GameMode {
+            epoch,
+            generation: 1,
+            mode: oink_routing::GameMode::On,
+            detected: false,
+            active: true,
+            cursor_hiding_cause_available: Some(true),
+        }),
+    );
+    assert!(h.driver.adapter.router().game_mode().active);
+    assert!(h.driver.relative_capture);
+
+    let mut settings = (*h.driver.settings).clone();
+    settings.mouse_mode = oink_foundation::input::InputMode::Disabled;
+    h.driver.snapshots.settings.publish(settings);
+    h.driver.refresh();
+    assert!(h.driver.adapter.router().mouse_disabled());
+    assert!(!h.driver.relative_capture);
+
+    let mut settings = (*h.driver.settings).clone();
+    settings.mouse_mode = oink_foundation::input::InputMode::Shared;
+    h.driver.snapshots.settings.publish(settings);
+    h.driver.refresh();
+    assert!(h.driver.relative_capture);
+
+    h.driver.command(InputCommand::MovePointerTo(local, None));
+    assert!(h.driver.adapter.router().has_pointer_focus());
+    assert!(!h.driver.relative_capture);
+}

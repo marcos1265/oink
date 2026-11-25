@@ -785,7 +785,7 @@ mod tests {
         )
         .unwrap();
         let loaded = AddressStore::load(dir.path()).unwrap();
-        let mut expected = vec![SocketAddr::from(([192, 168, 8, 232], 3))];
+        let mut expected = vec![SocketAddr::from(([192, 0, 2, 232], 3))];
         expected.extend((1..=7).map(|n| SocketAddr::from(([10, 0, 0, n], 47470))));
         assert_eq!(loaded.candidates(peer), expected);
         // The pin follows its IP to the kept (newest) entry.

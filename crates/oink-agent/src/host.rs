@@ -129,7 +129,9 @@ impl AgentHost {
             #[cfg(windows)]
             let termination = {
                 let mut termination = termination;
-                if oink_winsvc::client::service_installation()? {
+                if !oink_foundation::paths::is_portable_mode()
+                    && oink_winsvc::client::service_installation()?
+                {
                     let (send, receive) = tokio::sync::oneshot::channel();
                     let watch = oink_winsvc::backend::watch_service_stop(move || {
                         let _ = send.send(());
@@ -499,22 +501,24 @@ pub const EXIT_ALREADY_RUNNING: u8 = 3;
 /// 返回进程退出码。调用前先初始化日志（`logs::init_service`）。
 pub fn run_service() -> u8 {
     #[cfg(windows)]
-    match oink_winsvc::backend::uiaccess() {
-        Ok(true) => {}
-        Ok(false) => {
-            return match std::env::current_dir()
-                .and_then(|cwd| oink_winsvc::backend::start_in(&oink_foundation::paths::data_dir(), &cwd))
-            {
-                Ok(_) => 0,
-                Err(error) => {
-                    tracing::error!(%error, "OinkInput UIAccess backend launch failed");
-                    1
-                }
-            };
-        }
-        Err(error) => {
-            tracing::error!(%error, "cannot query backend UIAccess");
-            return 1;
+    if !oink_foundation::paths::is_portable_mode() {
+        match oink_winsvc::backend::uiaccess() {
+            Ok(true) => {}
+            Ok(false) => {
+                return match std::env::current_dir()
+                    .and_then(|cwd| oink_winsvc::backend::start_in(&oink_foundation::paths::data_dir(), &cwd))
+                {
+                    Ok(_) => 0,
+                    Err(error) => {
+                        tracing::error!(%error, "OinkInput UIAccess backend launch failed");
+                        1
+                    }
+                };
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot query backend UIAccess");
+                return 1;
+            }
         }
     }
     let result = crate::backend::run_main(|| -> anyhow::Result<()> {

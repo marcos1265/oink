@@ -37,10 +37,10 @@ class MobileAudioOwner(
     private val audioManager = this.context.getSystemService(AudioManager::class.java)
     private val handles = LongArray(2)
     private val generations = arrayOf(0uL, 0uL, 0uL)
-    private val exclusive = booleanArrayOf(true, true)
+    private val exclusive = booleanArrayOf(false, true)
     private val kinds = listOf(MobileMediaKind.SPEAKER, MobileMediaKind.MICROPHONE, MobileMediaKind.FORWARD)
     private var subscription: MobileMediaSubscription? = null
-    private var focusHeld = false
+    @Volatile private var lowLatencyOutput = com.hachiwii.oink.LocalSettings(this.context).lowLatencyAudio
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
     private val exitVolume = SystemExitVolume(audioManager, attributes)
@@ -89,23 +89,6 @@ class MobileAudioOwner(
             }
         }
     } }
-    private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-        .setAudioAttributes(attributes)
-        .setWillPauseWhenDucked(true)
-        .setOnAudioFocusChangeListener(focusChanged@ { change ->
-            // A queued callback from an abandoned request cannot grant the next local session focus.
-            if (media.snapshot().enabledMask.toInt() and 1 == 0) return@focusChanged
-            when (change) {
-                AudioManager.AUDIOFOCUS_GAIN -> {
-                    focusHeld = true
-                    media.clearFailure(MobileMediaKind.SPEAKER)
-                }
-                else -> {
-                    focusHeld = false
-                    media.reportFailure(MobileMediaKind.SPEAKER, media.snapshot().generation, MobileMediaFailure.INTERRUPTED)
-                }
-            }
-        }, Handler(Looper.getMainLooper())).build()
     private val recording = object : AudioManager.AudioRecordingCallback() {
         override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
             if (handles[1] == 0L) return
@@ -156,6 +139,13 @@ class MobileAudioOwner(
         refreshMicrophonePermission()
         if (enabled) media.clearFailure(kind)
         media.setEnabled(kind, enabled)
+    }
+    fun setLowLatencyOutput(enabled: Boolean) {
+        if (lowLatencyOutput == enabled) return
+        lowLatencyOutput = enabled
+        scope.launch {
+            if (handles[0] != 0L) media.requestRebuildResources(1u)
+        }
     }
     /**
      * Adds the audio foreground types of [resources] (1 playback, 2 microphone) to the connection
@@ -221,16 +211,9 @@ class MobileAudioOwner(
                 media.reportFailure(kind, generation, MobileMediaFailure.SYSTEM_BLOCKED)
                 continue
             }
-            if (index == 0 && !focusHeld) {
-                focusHeld = audioManager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-                if (!focusHeld) {
-                    media.reportFailure(kind, generation, MobileMediaFailure.INTERRUPTED)
-                    continue
-                }
-            }
             if (!media.claimStart(kind, generation)) continue
             generations[index] = generation
-            val handle = withContext(Dispatchers.IO) { native[index].open(index == 1, generation.toLong(), exclusive[index]) }
+            val handle = withContext(Dispatchers.IO) { native[index].open(index == 1, generation.toLong(), exclusive[index], lowLatencyOutput) }
             handles[index] = handle
             val attached = handle != 0L && media.attachAudio(kind, generation, native[index].address(handle).toULong())
             val started = attached && withContext(Dispatchers.IO) { native[index].start(handle) == 0 }
@@ -243,10 +226,6 @@ class MobileAudioOwner(
         }
         snapshot = media.snapshot()
         mutableState.value = snapshot
-        if (handles[0] == 0L && focusHeld) {
-            audioManager.abandonAudioFocusRequest(focus)
-            focusHeld = false
-        }
         // Types stay while their switch is on or their stream is open (a paused microphone keeps its
         // type for the next demand); the others are dropped. Only ensureForeground adds them.
         runCatching { ConnectionService.retainAudioTypes(audioTypesInUse(snapshot.enabledMask.toInt(), handles[0] != 0L, handles[1] != 0L)) }
@@ -277,7 +256,6 @@ class MobileAudioOwner(
             context.contentResolver.unregisterContentObserver(volumeChanges)
             exitVolume.retire()
             media.clearExitVolumeEndpoint()
-            audioManager.abandonAudioFocusRequest(focus)
             scope.cancel()
         }
     }

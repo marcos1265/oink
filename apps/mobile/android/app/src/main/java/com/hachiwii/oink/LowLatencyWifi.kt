@@ -96,7 +96,7 @@ internal class LowLatencyWifi(context: Context) {
  */
 internal suspend fun followAudioRole(state: Flow<AppState>, wifi: LowLatencyWifi) {
     try {
-        state.map { it.localAudio.audioRole }.distinctUntilChanged().collect { wifi.audioRole(it) }
+        state.map { it.localAudio.audioStreaming }.distinctUntilChanged().collect { wifi.audioRole(it) }
     } finally {
         wifi.audioRole(false)
     }

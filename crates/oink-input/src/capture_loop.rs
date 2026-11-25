@@ -61,6 +61,9 @@ pub trait CaptureLoop: Send {
     fn mouse_disabled(&self) -> bool {
         false
     }
+    fn mouse_local(&self) -> bool {
+        false
+    }
     fn keyboard_disabled(&self) -> bool {
         false
     }
@@ -197,6 +200,17 @@ pub(crate) fn mouse_disabled() -> bool {
             disabled
         }
         Err(_) => MOUSE_DISABLED.get(),
+    })
+}
+thread_local! { static MOUSE_LOCAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(crate) fn mouse_local() -> bool {
+    OWNER.with(|slot| match slot.try_borrow() {
+        Ok(owner) => {
+            let local = owner.as_ref().is_some_and(|owner| owner.mouse_local());
+            MOUSE_LOCAL.set(local);
+            local
+        }
+        Err(_) => MOUSE_LOCAL.get(),
     })
 }
 pub(crate) fn keyboard_disabled() -> bool {

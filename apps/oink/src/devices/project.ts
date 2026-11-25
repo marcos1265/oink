@@ -5,6 +5,13 @@ import { deviceOs } from './types';
 import type { Device } from './types';
 import type { PermissionItem } from '../api/types';
 import { problemText } from '../i18n';
+const splitConnectedAddress = (addr: string | null | undefined): { ip: string; port: number } => {
+    if (!addr) return { ip: '', port: 0 };
+    const i = addr.lastIndexOf(':');
+    if (i <= 0) return { ip: addr, port: 0 };
+    const port = Number(addr.slice(i + 1));
+    return { ip: addr.slice(0, i).replace(/^\[|\]$/g, ''), port: Number.isFinite(port) ? port : 0 };
+};
 /** A fault's own reason, or none: `none`, a missing report and unrecognized
  * codes name no cause, and problemText would render them as a bare
  * "unavailable" that the tooltip then repeated after its own "unavailable". */
@@ -28,7 +35,7 @@ export function presentCards(view: DeviceCardsView | null, intents: CardIntent[]
             privileged: card.logo === 'android_privileged',
             group: card.isSelf ? 'self' : card.section === 'offline' ? 'offline' : 'online',
             offlineReason:card.connection.kind==='offline'?card.connection.reason:undefined,
-            ip: '', port: 0,
+            ...splitConnectedAddress(card.connectedAddress),
             latency: card.connection.kind === 'online' ? card.connection.signal.rttMs : null,
             lastSeen: card.lastSeenMs,
             accessibilityMissing: card.os === 'macos' && (card.isSelf

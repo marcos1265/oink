@@ -109,7 +109,7 @@ fun SettingsPage(init: UiInit, prefs: Prefs, set: (Prefs) -> Unit, model: AppMod
     var historyBusy by remember { mutableStateOf(false) }
     val toast = remember { mutableStateOf(init.settingsToast?.let { ToastData(it) }) }
     val freeze = init.settingsToast != null
-    LaunchedEffect(toast.value?.id) { val t = toast.value; if (t != null && !freeze) { kotlinx.coroutines.delay(2000); if (toast.value?.id == t.id) toast.value = null } }
+    LaunchedEffect(toast.value?.id) { val t = toast.value; if (t != null && !freeze) { kotlinx.coroutines.delay(1400); if (toast.value?.id == t.id) toast.value = null } }
     LaunchedEffect(Unit) { actions.refreshCache(); enter.animateTo(0f, tween(320, easing = EaseOutExpo)) }
     fun close() { scope.launch { enter.animateTo(1f, tween(320, easing = EaseOutExpo)); onClose() } }
     fun push(route: String) { stack = stack + route }
@@ -130,7 +130,7 @@ fun SettingsPage(init: UiInit, prefs: Prefs, set: (Prefs) -> Unit, model: AppMod
                 SettingsView(route, pushed = i > 0 && !(i < init.settingsStack.size && init.settingsStack[i] == route), popping = popping && i == stack.lastIndex,
                     onPopped = { stack = stack.dropLast(1); popping = false }, onBack = { pop() }, scrollTo = if (i == 0) init.settingsScroll else null) {
                     when {
-                        route == "main" -> MainView(prefs, set, model, cacheBusy, leaving, historyBusy, push = { push(it) }, openDialog = { dialog = it })
+                        route == "main" -> MainView(prefs, set, model, cacheBusy, leaving, historyBusy, push = { push(it) }, openDialog = { dialog = it }, onQuit = actions.quitApp)
                         route == "privileged" -> PrivilegedView(prefs, set, step, { step = it }, { dialog = it }, actions, model)
                         route == "licenses" -> LicensesView { push("license:$it") }
                         route.startsWith("license:") -> LicenseText(route.removePrefix("license:"))
@@ -170,7 +170,7 @@ fun SettingsPage(init: UiInit, prefs: Prefs, set: (Prefs) -> Unit, model: AppMod
             }
             else -> if (d.startsWith("picker:")) PickerDialog(d.removePrefix("picker:"), prefs, set) { dialog = null }
         }
-        Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) { TopToast(toast.value) }
+        Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) { TopToast(toast.value, onDismiss = { toast.value = null }) }
     }
 }
 
@@ -190,7 +190,7 @@ private fun SettingsView(route: String, pushed: Boolean, popping: Boolean, onPop
     Column(Modifier.fillMaxSize().graphicsLayer { translationX = x.value * size.width }.background(c.bg).windowInsetsPadding(WindowInsets.safeDrawing)) {
         Box(Modifier.fillMaxWidth().height(64.dp).background(c.bg).padding(horizontal = 16.dp)) {
             IconButton48(Modifier.align(Alignment.CenterStart), if (route == "main") "关闭设置" else "返回", onClick = onBack) { Lucide(DesignIconData.lucideChevronLeft, 23.dp, c.ink) }
-            T(titles[route] ?: licenseTitle(route), 18f, c.ink, Modifier.align(Alignment.Center).widthIn(max = 265.dp), weight = 650, lineHeight = 25.2f, ellipsis = true)
+            T(titles[route] ?: licenseTitle(route), 18f, c.ink, Modifier.align(Alignment.Center).widthIn(max = 265.dp), weight = 650, lineHeight = 25.2f, ellipsis = true, raw = route.startsWith("license:"))
         }
         CompositionLocalProvider(LocalSectionAnchors provides { id, y -> anchors[id] = y + with(density) { (4 - 8).dp.roundToPx() } }) {
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)) {
@@ -224,15 +224,23 @@ private fun Modifier.rowLine(first: Boolean): Modifier {
 }
 
 @Composable
-private fun ValueRow(title: String, value: String?, first: Boolean = false, disabled: Boolean = false, busy: Boolean = false, onClick: () -> Unit) {
+private fun ValueRow(title: String, value: String?, first: Boolean = false, disabled: Boolean = false, busy: Boolean = false, rawValue: Boolean = false, onClick: () -> Unit) {
     val c = Oink.colors
     val haptic = rememberHaptics()
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val rowDesc = buildString {
+        append(com.hachiwii.oink.L10n.translate(title, lang))
+        if (value != null) {
+            append("，")
+            append(if (rawValue) value else com.hachiwii.oink.L10n.translate(value, lang))
+        }
+    }
     Row(Modifier.fillMaxWidth().rowLine(first).heightIn(min = 54.dp).press(enabled = !disabled, pressedColor = c.press) { haptic(false); onClick() }
-        .padding(horizontal = 16.dp, vertical = 12.dp).semantics { contentDescription = "$title${if (value != null) "，$value" else ""}" },
+        .padding(horizontal = 16.dp, vertical = 12.dp).semantics { contentDescription = rowDesc },
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             T(title, 16f, if (disabled) c.faint else c.ink, lineHeight = 22.4f)
-            if (value != null) T(value, 13f, c.muted, lineHeight = 18.85f)
+            if (value != null) T(value, 13f, c.muted, lineHeight = 18.85f, raw = rawValue)
         }
         if (busy) Spinner(18.dp)
     }
@@ -257,7 +265,7 @@ private fun SwitchRow(title: String, sub: String?, checked: Boolean, first: Bool
 }
 
 @Composable
-private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheBusy: Boolean, leaving: Boolean, historyBusy: Boolean, push: (String) -> Unit, openDialog: (String) -> Unit) {
+private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheBusy: Boolean, leaving: Boolean, historyBusy: Boolean, push: (String) -> Unit, openDialog: (String) -> Unit, onQuit: () -> Unit = {}) {
     val c = Oink.colors
     val haptic = rememberHaptics()
     val privOn = prefs.privileged == "on"
@@ -265,9 +273,10 @@ private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheB
     // This phone's name as the group sees it; the core owns it (the system name is the default).
     Section("本机", id = "device", top = 8.dp) {
         val name = model.deviceName
-        ValueRow("设备名", name?.name ?: model.selfName, first = true, disabled = name == null) { openDialog("deviceName") }
+        ValueRow("设备名", name?.name ?: model.selfName, first = true, disabled = name == null, rawValue = true) { openDialog("deviceName") }
     }
     Section("外观", id = "appearance") {
+        val lang = com.hachiwii.oink.LocalAppLang.current
         // Theme colour row: 28 swatch in a 40 target; the ring marks the selection.
         Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             T("主题色", 16f, c.ink, Modifier.weight(1f).widthIn(min = 64.dp), lineHeight = 22.4f)
@@ -275,7 +284,8 @@ private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheB
             Row(Modifier.offset(x = 6.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 Accent.entries.forEach { a ->
                     val sel = prefs.accent == a
-                    Box(Modifier.size(40.dp).clip(CircleShape).press(role = Role.RadioButton) { haptic(false); set(prefs.copy(accent = a)) }.semantics { contentDescription = a.label }, contentAlignment = Alignment.Center) {
+                    val swLabel = com.hachiwii.oink.L10n.translate(a.label, lang)
+                    Box(Modifier.size(40.dp).clip(CircleShape).press(role = Role.RadioButton) { haptic(false); set(prefs.copy(accent = a)) }.semantics { contentDescription = swLabel }, contentAlignment = Alignment.Center) {
                         val sw = Color(a.base)
                         Box(Modifier.size(28.dp).drawBehind {
                             if (sel) {
@@ -314,6 +324,7 @@ private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheB
         ValueRow("麦克风自动关闭", if (audio) optionLabel("micAutoOff", "${prefs.micAutoOff}") else "连接就绪后可修改", first = prefs.privileged != "on", disabled = !audio) { pick("micAutoOff") }
         ValueRow("扬声器自动关闭", if (audio) optionLabel("speakerAutoOff", "${prefs.speakerAutoOff}") else "连接就绪后可修改", disabled = !audio) { pick("speakerAutoOff") }
         SwitchRow("回声消除", "消除麦克风录制的本机播放的音频", prefs.echoCancel, disabled = !audio, onChange = { set(prefs.copy(echoCancel = it)) })
+        SwitchRow("低延迟音频", "优先最低延迟；关闭时使用标准媒体通道以匹配系统音量并更省电", prefs.lowLatencyAudio, onChange = { set(prefs.copy(lowLatencyAudio = it)) })
     }
     Section("通知与后台", "在控制中心编辑开关，可以添加 Oink 的「复制」「粘贴」「接收音频」「音频转发」「共享麦克风」。", id = "system") {
         SwitchRow("常驻通知", if (model.worksInBackground) "在通知栏显示在线设备和音频状态" else "已关闭：离开 Oink 后，Oink 将无法在后台工作",
@@ -346,12 +357,17 @@ private fun MainView(prefs: Prefs, set: (Prefs) -> Unit, model: AppModel, cacheB
     Section("关于", id = "about") {
         Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             T("版本", 16f, c.ink, Modifier.weight(1f), lineHeight = 22.4f)
-            T(model.version, 15f, c.muted, lineHeight = 21f, tabular = true)
+            T(model.version, 15f, c.muted, lineHeight = 21f, tabular = true, raw = true)
         }
         ValueRow("开源许可", null) { push("licenses") }
     }
+    Row(Modifier.padding(top = 24.dp).fillMaxWidth().height(48.dp)
+        .clip(RoundedCornerShape(24.dp)).background(c.chip).press { haptic(false); onQuit() },
+        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        T("退出 Oink", 15f, c.ink, weight = 600, lineHeight = 21f)
+    }
     // Only while the group has other devices (user 2026-11-11).
-    if (model.peers.isNotEmpty()) Row(Modifier.padding(top = 24.dp).fillMaxWidth().alpha(if (leaving) .4f else 1f).height(48.dp)
+    if (model.peers.isNotEmpty()) Row(Modifier.padding(top = 12.dp).fillMaxWidth().alpha(if (leaving) .4f else 1f).height(48.dp)
         .clip(RoundedCornerShape(24.dp)).background(c.badSoft).press(!leaving) { openDialog("leaveGroup") },
         horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
         T("退出设备组", 15f, c.badInk, weight = 600, lineHeight = 21f)
@@ -425,13 +441,16 @@ private val steps = listOf(
 private fun StepText(text: String, color: Color, link: String?, modifier: Modifier, open: () -> Unit) {
     val c = Oink.colors
     if (link == null) { T(text, 13.5f, color, modifier, lineHeight = 20.925f); return }
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val translatedText = com.hachiwii.oink.L10n.translate(text, lang)
+    val translatedLink = com.hachiwii.oink.L10n.translate(link, lang)
     val current by rememberUpdatedState(open)
-    val annotated = remember(text, link, c.accentInk) {
+    val annotated = remember(translatedText, translatedLink, c.accentInk) {
         androidx.compose.ui.text.buildAnnotatedString {
-            append(text); append(" ")
+            append(translatedText); append(" ")
             withLink(androidx.compose.ui.text.LinkAnnotation.Clickable("developer-options",
                 androidx.compose.ui.text.TextLinkStyles(androidx.compose.ui.text.SpanStyle(color = c.accentInk, fontWeight = systemWeight(600)))) { current() }) {
-                append(link)
+                append(translatedLink)
                 appendInlineContent("external", "↗")
             }
         }
@@ -578,7 +597,7 @@ private fun LicensesView(open: (String) -> Unit) {
             Row(Modifier.fillMaxWidth().rowLine(i == 0).heightIn(min = 54.dp).press(pressedColor = c.press) { haptic(false); open(item.id) }.padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    T(item.name, 16f, c.ink, lineHeight = 22.4f); T("${item.version} · ${item.license}", 13f, c.muted, lineHeight = 18.85f)
+                    T(item.name, 16f, c.ink, lineHeight = 22.4f, raw = true); T("${item.version} · ${item.license}", 13f, c.muted, lineHeight = 18.85f, raw = true)
                 }
                 Lucide(DesignIconData.lucideChevronRight, 18.dp, c.faint, modifier = Modifier.offset(x = 4.dp))
             }
@@ -595,8 +614,8 @@ private fun LicenseText(id: String) {
     val body = remember(id) { (item.notices + item.texts.map { OpenSourceLicenses.text(context, it).trimEnd() }).joinToString("\n\n") }
     androidx.compose.foundation.text.selection.SelectionContainer {
         Column(Modifier.padding(horizontal = 4.dp, vertical = 8.dp)) {
-            T("${item.name} ${item.version} · ${item.license}", 13.5f, c.text2, lineHeight = 22.95f, tabular = true)
-            T(body, 13.5f, c.text2, Modifier.padding(top = 13.5.dp), lineHeight = 22.95f)
+            T("${item.name} ${item.version} · ${item.license}", 13.5f, c.text2, lineHeight = 22.95f, tabular = true, raw = true)
+            T(body, 13.5f, c.text2, Modifier.padding(top = 13.5.dp), lineHeight = 22.95f, raw = true)
         }
     }
 }
@@ -626,11 +645,14 @@ private fun DeviceNameDialog(name: DeviceNameUi?, onClose: () -> Unit, onSave: (
             decorationBox = { inner ->
                 Box(Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(c.field).border(1.dp, c.track, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp),
                     contentAlignment = Alignment.CenterStart) {
-                    if (value.isEmpty()) T(name?.systemName.orEmpty(), 16f, c.faint, lineHeight = 22.4f)
+                    if (value.isEmpty()) T(name?.systemName.orEmpty(), 16f, c.faint, lineHeight = 22.4f, raw = true)
                     inner()
                 }
             })
-        if (name != null) T("默认：${name.systemName}", 12.5f, c.muted, Modifier.padding(top = 10.dp), lineHeight = 19.375f)
+        if (name != null) {
+            val prefix = com.hachiwii.oink.L10n.translate("默认：", com.hachiwii.oink.LocalAppLang.current)
+            T(prefix + name.systemName, 12.5f, c.muted, Modifier.padding(top = 10.dp), lineHeight = 19.375f, raw = true)
+        }
     }
 }
 

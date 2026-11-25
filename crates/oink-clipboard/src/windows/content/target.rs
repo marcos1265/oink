@@ -478,6 +478,8 @@ fn build_inner(mut spec: NativeSpec, clipboard: bool) -> Result<Target, Clipboar
             Some(StandardFormat::Text) if foreign || rep.format == NativeFormat::WindowsPredefined(13) => {
                 vec![1, 7, 16]
             }
+            Some(StandardFormat::Png) if clipboard => vec![super::super::formats().png as u16, 8, 17],
+            Some(StandardFormat::Png) => vec![super::super::formats().png as u16, 17, 8],
             Some(StandardFormat::Url) => {
                 let item = spec
                     .inventory
@@ -497,7 +499,10 @@ fn build_inner(mut spec: NativeSpec, clipboard: bool) -> Result<Target, Clipboar
             _ => vec![],
         };
         for cf in ids {
-            if let Some(existing) = bindings.iter_mut().find(|b| b.format.cfFormat == cf) {
+            if let Some(existing) = bindings
+                .iter_mut()
+                .find(|b| b.format.cfFormat == cf && b.medium == Medium::HGlobal)
+            {
                 if existing.derived {
                     existing.alternatives.push(rep.id);
                 }
@@ -526,7 +531,140 @@ fn build_inner(mut spec: NativeSpec, clipboard: bool) -> Result<Target, Clipboar
         rendered: None,
     })
 }
+fn eager_image_priority(rep: &Representation) -> u8 {
+    match &rep.format {
+        NativeFormat::Mac(name) if name == "public.png" => 0,
+        NativeFormat::Unknown(name) if super::png_name(name) => 0,
+        NativeFormat::WindowsRegistered(name) if super::png_name(name) => 0,
+        NativeFormat::WindowsPredefined(17) => 1,
+        NativeFormat::WindowsPredefined(8) => 2,
+        _ => 3,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn try_build_eager_image_clipboard(spec: &NativeSpec) -> Option<Vec<(u32, Vec<u8>)>> {
+    try_build_eager_image_clipboard_while(spec, &|| Ok(()))
+}
+
+pub(crate) fn try_build_eager_image_clipboard_while(
+    spec: &NativeSpec,
+    current: &dyn Fn() -> io::Result<()>,
+) -> Option<Vec<(u32, Vec<u8>)>> {
+    if !spec.files.is_empty()
+        || spec.inventory.has_promises()
+        || spec.inventory.items.iter().any(|item| item.file.is_some())
+        || current().is_err()
+    {
+        return None;
+    }
+    let wanted: Vec<&Representation> = spec.inventory.wanted(ClipPlatform::Windows).collect();
+    if wanted.is_empty()
+        || !wanted.iter().any(|rep| rep.standard == Some(StandardFormat::Png))
+        || wanted.iter().any(|rep| rep.standard.is_none())
+    {
+        return None;
+    }
+
+    let foreign = spec.inventory.platform != ClipPlatform::Windows;
+    let decode_rep = |rep: &Representation| -> Option<Vec<ClipData>> {
+        if current().is_err() {
+            return None;
+        }
+        let mut reader = content::terminal_reader(spec.contents.open(rep.id).ok()?);
+        let bytes = content::read_all(&mut reader).ok()?;
+        let rep_foreign = foreign || rep.format.platform() != ClipPlatform::Windows;
+        if rep_foreign {
+            content::decode_standard(rep, &bytes).ok()
+        } else {
+            WindowsTranslator
+                .standard_with_source(rep, &bytes, spec.contents.as_ref())
+                .ok()
+        }
+    };
+
+    let mut image_reps: Vec<&Representation> = wanted
+        .iter()
+        .copied()
+        .filter(|rep| rep.standard == Some(StandardFormat::Png))
+        .collect();
+    image_reps.sort_by_key(|rep| eager_image_priority(rep));
+
+    let mut items: Vec<ClipData> = Vec::new();
+    for rep in image_reps {
+        if current().is_err() {
+            return None;
+        }
+        if let Some(decoded) = decode_rep(rep)
+            && let Some(png) = decoded.into_iter().find(|d| matches!(d, ClipData::Png(_)))
+        {
+            items.push(png);
+            break;
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut has_text = false;
+    let mut has_html = false;
+    let mut has_rtf = false;
+    for rep in wanted {
+        if current().is_err() {
+            return None;
+        }
+        match rep.standard {
+            Some(StandardFormat::Png) | Some(StandardFormat::Url) | None => continue,
+            Some(StandardFormat::Text) if has_text => continue,
+            Some(StandardFormat::Html) if has_html => continue,
+            Some(StandardFormat::Rtf) if has_rtf => continue,
+            _ => {}
+        }
+        let Some(decoded) = decode_rep(rep) else {
+            continue;
+        };
+        for data in decoded {
+            match &data {
+                ClipData::Text(_) if !has_text => {
+                    has_text = true;
+                    items.push(data);
+                }
+                ClipData::Html(_) if !has_html => {
+                    has_html = true;
+                    items.push(data);
+                }
+                ClipData::Rtf(_) if !has_rtf => {
+                    has_rtf = true;
+                    items.push(data);
+                }
+                ClipData::Custom { .. } => items.push(data),
+                _ => {}
+            }
+        }
+    }
+
+    let mut payload = super::super::prepare(&items, spec.sensitivity);
+    if payload.is_empty() {
+        return None;
+    }
+    if let Some((marker, cf)) = crate::dedupe::marker(spec.inventory.id).zip(super::format_id(
+        &NativeFormat::WindowsRegistered(crate::dedupe::MARKER_WINDOWS.into()),
+    )) && !payload.iter().any(|(existing, _)| *existing == u32::from(cf))
+    {
+        payload.push((u32::from(cf), marker));
+    }
+    Some(payload)
+}
+
 pub(crate) fn set_clipboard_guarded(
+    spec: NativeSpec,
+    guard: crate::content::ReaderGuard,
+) -> Result<u64, ClipboardError> {
+    set_clipboard_guarded_hwnd(None, spec, guard)
+}
+
+pub(crate) fn set_clipboard_guarded_hwnd(
+    _hwnd: Option<windows::Win32::Foundation::HWND>,
     mut spec: NativeSpec,
     guard: crate::content::ReaderGuard,
 ) -> Result<u64, ClipboardError> {
@@ -1583,5 +1721,79 @@ mod addition_tests {
                 assert!(!bytes.contains(&b'?'));
             }
         }
+    }
+
+    #[test]
+    fn eager_image_decodes_portable_unknown_png_from_windows_history_link() {
+        let png_bytes = crate::dnd::preview::asymmetric_png();
+
+        let id = OfferId {
+            clip: crate::model::ClipId {
+                origin: oink_foundation::DeviceId([1; 32]),
+                seq: 1,
+            },
+            generation: 1,
+        };
+        let rep_id = RepresentationId(1);
+        let inventory = Inventory {
+            id,
+            platform: ClipPlatform::Windows,
+            items: vec![crate::model::ContentItem {
+                id: crate::model::ItemId(0),
+                file: None,
+                virtual_files: false,
+                representations: vec![Representation {
+                    id: rep_id,
+                    format: NativeFormat::Unknown("image/png".into()),
+                    medium: Medium::Bytes,
+                    aspect: 1,
+                    index: -1,
+                    standard: Some(StandardFormat::Png),
+                    data: RepresentationData::Reader {
+                        size: crate::model::ContentSize::Known(png_bytes.len() as u64),
+                    },
+                }],
+            }],
+            roots: vec![],
+        };
+        struct MemProvider(Inventory, Vec<u8>);
+        impl content::Provider for MemProvider {
+            fn inventory(&self) -> Inventory {
+                self.0.clone()
+            }
+            fn open(&self, id: RepresentationId) -> io::Result<crate::FileReader> {
+                if id == RepresentationId(1) {
+                    Ok(Box::new(io::Cursor::new(self.1.clone())))
+                } else {
+                    Err(io::ErrorKind::NotFound.into())
+                }
+            }
+            fn translator(&self) -> Arc<dyn content::Translator> {
+                Arc::new(WindowsTranslator)
+            }
+        }
+        let spec = NativeSpec {
+            inventory,
+            contents: Arc::new(MemProvider(
+                Inventory {
+                    id,
+                    platform: ClipPlatform::Windows,
+                    items: vec![],
+                    roots: vec![],
+                },
+                png_bytes.clone(),
+            )),
+            files: vec![],
+            file_contents: None,
+            sensitivity: crate::Sensitivity::Normal,
+        };
+        let payload = try_build_eager_image_clipboard(&spec)
+            .expect("portable Unknown(\"image/png\") from Windows PC must decode eagerly");
+        let formats = crate::windows::formats();
+        assert_eq!(
+            payload.iter().find(|(cf, _)| *cf == formats.png).map(|(_, b)| b),
+            Some(&png_bytes)
+        );
+        assert!(payload.iter().any(|(cf, _)| *cf == 8 || *cf == 17));
     }
 }

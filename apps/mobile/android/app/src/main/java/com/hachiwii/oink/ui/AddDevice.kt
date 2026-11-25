@@ -71,11 +71,12 @@ fun AddDevicePage(model: AppModel, actions: AppActions, ui: UiState) {
             }
             GroupTitle("附近设备", model.nearby.size, Modifier.heightIn(min = 36.dp)) {
                 Spacer(Modifier.weight(1f))
+                val refreshDesc = com.hachiwii.oink.L10n.translate("刷新附近设备", com.hachiwii.oink.LocalAppLang.current)
                 // 40 × 40 with margin -4 -8 -4 auto: it lays out 32 high inside the 36 header.
                 Box(Modifier.pullUpTop(4.dp).pullUpBottom(4.dp).offset(x = 8.dp).size(40.dp).press(shape = RoundedCornerShape(14.dp)) {
                     if (!spin.isRunning) scope.launch { spin.snapTo(0f); spin.animateTo(360f, tween(720, easing = CubicBezierEasing(.4f, 0f, .2f, 1f))) }
                     actions.refreshNearby()
-                }.semantics { contentDescription = "刷新附近设备" }, contentAlignment = Alignment.Center) {
+                }.semantics { contentDescription = refreshDesc }, contentAlignment = Alignment.Center) {
                     Lucide(DesignIconData.lucideRefreshCw, 17.dp, c.muted, modifier = Modifier.rotate(spin.value))
                 }
             }
@@ -120,7 +121,8 @@ private fun Searching() {
 @Composable
 private fun RoundAction(bg: Color, label: String, onClick: () -> Unit, icon: @Composable () -> Unit) {
     val haptic = rememberHaptics()
-    Box(Modifier.size(40.dp).clip(CircleShape).background(bg).press { haptic(false); onClick() }.semantics { contentDescription = label }, contentAlignment = Alignment.Center) { icon() }
+    val desc = com.hachiwii.oink.L10n.translate(label, com.hachiwii.oink.LocalAppLang.current)
+    Box(Modifier.size(40.dp).clip(CircleShape).background(bg).press { haptic(false); onClick() }.semantics { contentDescription = desc }, contentAlignment = Alignment.Center) { icon() }
 }
 
 /** ad-row: 76 min, logo, name 17/650, sub 13; divider from the text (left 46). */
@@ -135,7 +137,7 @@ fun PeerRow(peer: NearbyUi, sub: String, subColor: Color = Oink.colors.muted, di
         .padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
         PlatformIcon(peer.platform, Modifier.alpha(if (disabled) .45f else 1f))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            T(peer.name, 17f, if (disabled) c.faint else c.ink, weight = 650, lineHeight = 22.95f, letterSpacing = -.2f)
+            T(peer.name, 17f, if (disabled) c.faint else c.ink, weight = 650, lineHeight = 22.95f, letterSpacing = -.2f, raw = true)
             T(sub, 13f, subColor, lineHeight = 18.2f, tabular = true)
         }
         trailing()
@@ -148,10 +150,11 @@ fun SelfInfoDialogBody(self: SelfInfo, all: Boolean, showAll: () -> Unit, copied
     val c = Oink.colors
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val haptic = rememberHaptics()
+    val lang = com.hachiwii.oink.LocalAppLang.current
     @Composable fun value(text: String) = Row(Modifier.offset(x = 6.dp).heightIn(min = 32.dp).clip(RoundedCornerShape(8.dp))
         .press(pressedColor = c.press) { haptic(false); clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)); copied(text) }
-        .padding(horizontal = 6.dp).semantics { contentDescription = "$text，点按复制" }, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        T(text, 13.5f, c.ink, lineHeight = 20.25f, tabular = true, ellipsis = true)
+        .padding(horizontal = 6.dp).semantics { contentDescription = com.hachiwii.oink.L10n.translate("$text，点按复制", lang) }, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        T(text, 13.5f, c.ink, lineHeight = 20.25f, tabular = true, ellipsis = true, raw = true)
         Lucide(DesignIconData.lucideCopy, 13.dp, c.faint)
     }
     @Composable fun line(label: String, values: @Composable ColumnScope.() -> Unit) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {

@@ -19,7 +19,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w412dp-h915dp-xxhdpi", application = android.app.Application::class)
+@Config(sdk = [34], qualifiers = "zh-rCN-w412dp-h915dp-xxhdpi", application = android.app.Application::class)
 class SettingsNavigationTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private fun left() = compose.onNodeWithTag("settings-layer").getUnclippedBoundsInRoot().left.value

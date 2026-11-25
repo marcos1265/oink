@@ -60,9 +60,9 @@ class BackupRulesTest {
     private val attachments = listOf("file" to "core/transfers/a/b.jpg", "file" to "received/c.txt")
 
     @Test
-    fun backupIsOnWithTheRuleFiles() {
+    fun backupIsOffWithExcludeAllRuleFiles() {
         val manifest = File("src/main/AndroidManifest.xml").readText()
-        assertTrue(manifest.contains("android:allowBackup=\"true\""))
+        assertTrue(manifest.contains("android:allowBackup=\"false\""))
         assertTrue(manifest.contains("android:fullBackupContent=\"@xml/backup_rules\""))
         assertTrue(manifest.contains("android:dataExtractionRules=\"@xml/data_extraction_rules\""))
     }
@@ -75,19 +75,18 @@ class BackupRulesTest {
     }
 
     @Test
-    fun historyAndSettingsAreBackedUpAndTransferred() {
+    fun historyAndSettingsAreAlsoExcludedFromCloudAndTransfer() {
         for ((name, rules) in listOf("cloud" to cloud, "transfer" to transfer, "legacy" to legacy)) {
-            for ((domain, path) in historyAndSettings) assertFalse("$name $path", excluded(rules, domain, path))
+            for ((domain, path) in historyAndSettings) assertTrue("$name $path", excluded(rules, domain, path))
         }
     }
 
-    /** Cloud backup has a 25 MB quota: attachments only move by device transfer. */
     @Test
-    fun attachmentsMoveOnlyByDeviceTransfer() {
+    fun attachmentsAreExcludedFromCloudAndTransfer() {
         for ((domain, path) in attachments) {
             assertTrue(path, excluded(cloud, domain, path))
             assertTrue(path, excluded(legacy, domain, path))
-            assertFalse(path, excluded(transfer, domain, path))
+            assertTrue(path, excluded(transfer, domain, path))
         }
     }
 }

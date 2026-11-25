@@ -122,10 +122,7 @@ impl Router {
             && self.pointer.as_ref() != Some(&at)
         {
             self.pointer = Some(at.clone());
-            self.local_cursor = Some(at.clone());
-            if !self.game_mode().active && self.cursor_clip.pending.is_none() {
-                self.out.push(Output::Inject(InjectEvent::MoveTo { pos: at.local }));
-            }
+            self.local_cursor = Some(at);
         }
     }
     /// Lifetime cumulative candidates suppressed by system confinement.

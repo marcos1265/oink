@@ -120,8 +120,9 @@ internal fun PdfPage(m: MessageUi, path: String, zoom: ZoomState, progress: () -
                 }
                 // The lower-resolution picture stands in while the sharper one is drawn.
                 val shown = page ?: PdfPageCache.get("$path:$i:$width")
+                val pageDesc = com.hachiwii.oink.L10n.translate("第 ${i + 1} 页", com.hachiwii.oink.LocalAppLang.current)
                 Box(Modifier.fillMaxWidth().aspectRatio(size.width / size.height.coerceAtLeast(1f)).background(Color.White)
-                    .semantics { contentDescription = appText("第 ${i + 1} 页", "Page ${i + 1}") }) {
+                    .semantics { contentDescription = pageDesc }) {
                     shown?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
                 }
             }

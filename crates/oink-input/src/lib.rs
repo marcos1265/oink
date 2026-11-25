@@ -174,6 +174,9 @@ pub trait InputBackend: Send + Sync {
     /// injection carries `dwExtraInfo = 0`. Other platforms ignore it.
     fn set_quicker_compat(&self, _enabled: bool) {}
 
+    /// Independent local cursor mode for Sunshine/Moonlight compatibility.
+    fn set_independent_mouse(&self, _enabled: bool) {}
+
     /// Atomic only: no native permission query on capture/injection threads.
     fn input_safety(&self) -> session_gate::InputSafety {
         Default::default()

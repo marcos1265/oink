@@ -180,10 +180,10 @@ async function menuShape() {
 it('the route submenu sits in the same place for PCs and phones: its own section right before the last one', async () => {
   openMenu();
   const pc = await menuShape();
-  expect(pc.slice(pc.indexOf('Connection Route') - 1)).toEqual(['|', 'Connection Route', '|', 'Pause sharing', 'Remove from group']);
+  expect(pc.slice(pc.indexOf('Connection Route') - 1)).toEqual(['|', 'Connection Route', 'Edit IP', '|', 'Pause sharing', 'Remove from group']);
   cleanup();
   openMenu(phone);
-  expect(await menuShape()).toEqual(['Connection Route', '|', 'Remove from group']);
+  expect(await menuShape()).toEqual(['Connection Route', 'Edit IP', '|', 'Remove from group']);
   cleanup();
   openMenu({ ...phone, group: 'offline' });
   expect(await menuShape()).not.toContain('Connection Route');

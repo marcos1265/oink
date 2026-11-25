@@ -79,6 +79,9 @@ class LocalSettings(private val context: Context) {
     var language: String
         get() = prefs.getString("language", "system") ?: "system"
         set(value) { prefs.edit { putString("language", value) } }
+    var lowLatencyAudio: Boolean
+        get() = prefs.getBoolean("lowLatencyAudio", false)
+        set(value) { prefs.edit { putBoolean("lowLatencyAudio", value) } }
     /** The device the transfer page sends to (computer or phone), chosen last; the default next time. */
     var transferTarget: String?
         get() = prefs.getString("transferTarget", null)

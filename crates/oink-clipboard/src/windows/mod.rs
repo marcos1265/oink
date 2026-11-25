@@ -170,8 +170,28 @@ impl ClipboardBackend for WinClipboard {
         spec: crate::NativeSpec,
         guard: crate::content::ReaderGuard,
     ) -> Result<u64, ClipboardError> {
+        self.write_native_cancellable(spec, guard, Arc::new(|| Ok(())))
+    }
+    fn write_native_cancellable(
+        &self,
+        spec: crate::NativeSpec,
+        guard: crate::content::ReaderGuard,
+        current: crate::content::ReaderGuard,
+    ) -> Result<u64, ClipboardError> {
+        current().map_err(|_| ClipboardError::Busy)?;
+        // Fetch and decode eager image formats BEFORE entering the STA worker
+        // thread, matching write_mobile_guarded, so network reads never block
+        // WM_CLIPBOARDUPDATE or trigger worker::JOB_TIMEOUT.
+        if let Some(payload) = content::target::try_build_eager_image_clipboard_while(&spec, &*current) {
+            current().map_err(|_| ClipboardError::Busy)?;
+            return self.worker.run(move |hwnd| {
+                guard().map_err(|_| ClipboardError::Busy)?;
+                write_on_worker(hwnd, &payload)
+            })?;
+        }
+        current().map_err(|_| ClipboardError::Busy)?;
         self.worker
-            .run(move |_| content::target::set_clipboard_guarded(spec, guard))?
+            .run(move |hwnd| content::target::set_clipboard_guarded_hwnd(Some(hwnd), spec, guard))?
     }
 
     fn write(&self, items: &[ClipData], sensitivity: Sensitivity) -> Result<u64, ClipboardError> {
@@ -602,7 +622,7 @@ fn prepare_items(items: &[ClipData]) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-fn write_on_worker(hwnd: HWND, payload: &[(u32, Vec<u8>)]) -> Result<u64, ClipboardError> {
+pub(crate) fn write_on_worker(hwnd: HWND, payload: &[(u32, Vec<u8>)]) -> Result<u64, ClipboardError> {
     // 剪贴板马上被清空，OLE 会释放之前的虚拟文件数据对象
     vfile::forget();
     {

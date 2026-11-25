@@ -10,7 +10,10 @@ import android.net.*
 import android.os.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.selects.select
@@ -38,6 +41,8 @@ class ConnectionService : Service() {
         const val EXTRA_FOREGROUND = "com.hachiwii.oink.FOREGROUND"
         private const val CHANNEL = PersistentNotices.CHANNEL
         private const val NOTIFICATION = PersistentNotices.ID
+        private const val BACKGROUND_DISCOVERY_MS = 15_000L
+        private const val BACKGROUND_IDLE_MS = 120_000L
         // Main thread only; cleared in onDestroy.
         @android.annotation.SuppressLint("StaticFieldLeak")
         @Volatile private var running: ConnectionService? = null
@@ -79,6 +84,8 @@ class ConnectionService : Service() {
     private var generation = 0L
     private var discovery: LanDiscovery? = null
     private var advertisement: LanAdvertisement? = null
+    private val discoveryReady = MutableStateFlow(false)
+    private val discoveryBurst = MutableStateFlow(0L)
     private var foreground = false
     /** Audio bits of the current foreground types (see [foregroundServiceTypes]). */
     private var audioTypes = 0
@@ -97,7 +104,8 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         running = this
-        getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "电脑连接", NotificationManager.IMPORTANCE_LOW))
+        L10n.sync(this)
+        createChannel()
         TransferNotices.createChannels(this)
         connectivity.registerNetworkCallback(NetworkRequest.Builder()
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
@@ -115,20 +123,51 @@ class ConnectionService : Service() {
         }
     }
 
+    private fun createChannel(lang: AppLang = L10n.current) {
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL, L10n.translate("电脑连接", lang), NotificationManager.IMPORTANCE_LOW)
+        )
+    }
+
     private suspend fun own() {
         repository.serviceEnabled(true)
         repository.status("正在连接…")
-        repository.onRefreshNearby = { discovery?.refresh() }
+        repository.onRefreshNearby = { discovery?.refresh(); discoveryBurst.value++ }
         repository.onDirectIncoming = { sender, count, first, record -> scope.launch { showReceived(sender, count, first, record) } }
         repository.onHiddenShare = { id, share -> scope.launch { showHiddenShare(id, share) } }
         repository.onAdvertisement = { advertisement?.update(it) }
         val notices = scope.launch {
-            // Online count, audio roles and the 「点按通知」 setting change it; nothing else (the system
-            // also rate-limits updates of one notification).
-            repository.state.map { persistentNotice(it) }.distinctUntilChanged().collect { showNotification(it) }
+            // Online count, audio roles, language and the 「点按通知」 setting change it; nothing else.
+            combine(repository.state.map { persistentNotice(it) }.distinctUntilChanged(), L10n.langFlow) { notice, lang ->
+                notice to lang
+            }.distinctUntilChanged().collect { (notice, lang) ->
+                createChannel(lang)
+                TransferNotices.createChannels(this@ConnectionService, lang)
+                showNotification(notice, lang)
+            }
         }
-        // Wi-Fi out of power save while this phone is the speaker exit or shares its microphone
-        // (user 2026-11-11), also with the screen off; released when the role ends or the service stops.
+        val discoveryLoop = scope.launch {
+            combine(discoveryReady, repository.hasVisibleActivity, discoveryBurst) { ready, visible, _ ->
+                ready to visible
+            }.collectLatest { (ready, visible) ->
+                if (!ready) {
+                    stopDiscovery()
+                    return@collectLatest
+                }
+                if (visible) {
+                    if (discovery == null) startDiscovery()
+                } else {
+                    while (currentCoroutineContext().isActive) {
+                        if (discovery == null) startDiscovery()
+                        delay(BACKGROUND_DISCOVERY_MS)
+                        stopDiscovery()
+                        delay(BACKGROUND_IDLE_MS)
+                    }
+                }
+            }
+        }
+        // Wi-Fi out of power save while this phone actually streams audio, also with the screen off;
+        // released when streaming stops or the service stops.
         val audioWifi = scope.launch { followAudioRole(repository.state, (application as OinkApplication).wifi) }
         repository.onRetryConnection = { retries.trySend(Unit) }
         repository.onNetworkFailed = { networkFailures.trySend(it) }
@@ -145,7 +184,8 @@ class ConnectionService : Service() {
                     // A failure still queued belongs to a core that is already stopped.
                     networkFailures.tryReceive()
                     withContext(Dispatchers.IO) { repository.startCore() }
-                    startDiscovery()
+                    discoveryReady.value = true
+                    discoveryBurst.value++
                     while (true) {
                         val restartAfter = select<Long?> {
                             changes.onReceive { null }
@@ -159,14 +199,14 @@ class ConnectionService : Service() {
                         val moved = next != selected
                         selected = next
                         bindPreferredNetwork()
-                        discovery?.close(); discovery = null
+                        stopDiscovery()
                         generation++
                         // The QUIC socket keeps the network it was created on; after the process
                         // moved to another Network it must be reopened there (review H17).
                         if (moved) withContext(Dispatchers.IO) { repository.rebindNetwork() }
                         repository.networkChanged(generation)
                         advertisement?.network(selected)
-                        startDiscovery()
+                        discoveryBurst.value++
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -207,6 +247,8 @@ class ConnectionService : Service() {
             repository.status("连接离线")
         } finally {
             withContext(NonCancellable) {
+                discoveryReady.value = false
+                discoveryLoop.cancelAndJoin()
                 notices.cancel()
                 // Joined, so the locks are released before a newer instance (waiting on serviceLock) follows the role.
                 audioWifi.cancelAndJoin()
@@ -249,6 +291,7 @@ class ConnectionService : Service() {
         android.util.Log.i("OinkNetwork", "process_binding requested=$selected actual=${connectivity.boundNetworkForProcess}")
     }
     private fun startDiscovery() {
+        if (discovery != null) return
         discovery = LanDiscovery(this, selected, generation,
             repository::discovered, repository::lost, repository::status)
         runCatching { discovery?.start() }.onFailure {
@@ -256,8 +299,12 @@ class ConnectionService : Service() {
             repository.status(it.message ?: "局域网发现启动失败")
         }
     }
-    private fun closeNativeDiscovery() {
+    private fun stopDiscovery() {
         discovery?.close(); discovery = null
+    }
+    private fun closeNativeDiscovery() {
+        discoveryReady.value = false
+        stopDiscovery()
         advertisement?.close(); advertisement = null
     }
     private fun isLan(caps: NetworkCapabilities?): Boolean = caps != null &&
@@ -293,6 +340,10 @@ class ConnectionService : Service() {
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         applyForegroundMode(intent?.getBooleanExtra(EXTRA_FOREGROUND, false) == true)
+        if (intent?.action == PersistentNotices.QUIT || repository.quitting) {
+            repository.quitApp()
+            return START_NOT_STICKY
+        }
         // A start request while the core failed to start is the user coming back to Oink.
         if (intent?.action == null && repository.state.value.startupFailure != null) retries.trySend(Unit)
         if (intent?.action == CANCEL_SHARE) intent.getLongExtra(EXTRA_SHARE, 0L).takeIf { it != 0L }?.let(repository::cancelShare)
@@ -331,12 +382,12 @@ class ConnectionService : Service() {
             shareForeground = noticeId
         } else if (canNotify()) notifications.notify(noticeId, notice)
     }
-    private fun showNotification(notice: PersistentNotice) {
+    private fun showNotification(notice: PersistentNotice, lang: AppLang = L10n.current) {
         // Without the persistent notification Oink posts nothing (decision 38).
         if (!foreground || !canNotify()) return
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION, PersistentNotices.build(this, notice))
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION, PersistentNotices.build(this, notice, lang))
     }
-    private fun notification(): Notification = PersistentNotices.build(this, persistentNotice(repository.state.value))
+    private fun notification(): Notification = PersistentNotices.build(this, persistentNotice(repository.state.value), L10n.current)
     override fun onBind(intent: Intent?) = null
     override fun onDestroy() {
         destroyed = true

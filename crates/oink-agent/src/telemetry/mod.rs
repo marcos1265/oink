@@ -214,8 +214,8 @@ mod ui;
 pub use ui::UiCapture;
 
 impl Owner {
-    pub fn new(data_dir: &Path, consent: ReportConsent) -> Self {
-        Self::build(data_dir, consent, true)
+    pub fn new(data_dir: &Path, _consent: ReportConsent) -> Self {
+        Self::offline(data_dir)
     }
 
     /// No report store, upload endpoint or native crash collector. The Windows

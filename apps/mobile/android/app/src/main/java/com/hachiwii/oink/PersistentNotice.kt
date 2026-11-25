@@ -17,18 +17,22 @@ internal data class PersistentNotice(val title: String, val text: String, val ta
 
 /** A button of the persistent notification, with its label. */
 internal enum class NoticeAction(val label: String) {
-    OPEN("打开 Oink"), COPY("复制内容"), STOP_SPEAKER("停止接收音频"), STOP_FORWARD("停止转发音频"), STOP_MICROPHONE("停止共享麦克风")
+    OPEN("打开 Oink"), COPY("复制内容"), STOP_SPEAKER("停止接收音频"), STOP_FORWARD("停止转发音频"), STOP_MICROPHONE("停止共享麦克风"), QUIT("退出")
 }
 
 /**
  * The buttons, in this order (user 2026-11-12; at most three): the action the tap does not do (tap =
- * copy → 「打开 Oink」, tap = open → 「复制内容」), then 「停止接收音频」 while this phone receives the
- * group's audio (「停止转发音频」 replaces it while forwarding) and 「停止共享麦克风」 while it shares its microphone.
+ * copy → 「打开 Oink」, tap = open → 「复制内容」), up to one active audio-stop button when paired with
+ * 「退出」, so 「退出」 always remains visible within Android's three-button notification limit.
  */
 internal fun noticeActions(tap: NoticeTap, speaker: Boolean, microphone: Boolean, forward: Boolean = false): List<NoticeAction> = buildList {
     add(if (tap == NoticeTap.COPY) NoticeAction.OPEN else NoticeAction.COPY)
-    if (forward) add(NoticeAction.STOP_FORWARD) else if (speaker) add(NoticeAction.STOP_SPEAKER)
-    if (microphone) add(NoticeAction.STOP_MICROPHONE)
+    val stops = buildList {
+        if (forward) add(NoticeAction.STOP_FORWARD) else if (speaker) add(NoticeAction.STOP_SPEAKER)
+        if (microphone) add(NoticeAction.STOP_MICROPHONE)
+    }
+    if (stops.isNotEmpty()) add(stops.first())
+    add(NoticeAction.QUIT)
 }
 
 internal const val NOTICE_TITLE_COPY = "Oink · 点按从共享剪贴板复制"
@@ -86,10 +90,11 @@ internal object PersistentNotices {
     const val CHANNEL = "connection"
     const val ID = 1
 
-    /** 停止接收音频 / 停止共享麦克风: commands to the running [ConnectionService]. */
+    /** 停止接收音频 / 停止共享麦克风 / 退出: commands to the running [ConnectionService]. */
     const val STOP_FORWARD = "com.hachiwii.oink.STOP_FORWARD"
     const val STOP_SPEAKER = "com.hachiwii.oink.STOP_SPEAKER"
     const val STOP_MICROPHONE = "com.hachiwii.oink.STOP_MICROPHONE"
+    const val QUIT = "com.hachiwii.oink.QUIT"
 
     /**
      * What a tap does, chosen in Settings 「点按通知」. Both are Activity PendingIntents. The copy goes to
@@ -132,18 +137,19 @@ internal object PersistentNotices {
         NoticeAction.STOP_FORWARD -> serviceIntent(context, STOP_FORWARD, 5)
         NoticeAction.STOP_SPEAKER -> serviceIntent(context, STOP_SPEAKER, 3)
         NoticeAction.STOP_MICROPHONE -> serviceIntent(context, STOP_MICROPHONE, 4)
+        NoticeAction.QUIT -> serviceIntent(context, QUIT, 6)
     }
 
     /** The small icon is the one-colour Oink mark; buttons per [noticeActions] (text only). */
-    fun build(context: Context, notice: PersistentNotice): Notification =
+    fun build(context: Context, notice: PersistentNotice, lang: AppLang = L10n.current): Notification =
         NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_oink)
-            .setContentTitle(notice.title).setContentText(notice.text)
+            .setContentTitle(L10n.translate(notice.title, lang)).setContentText(L10n.translate(notice.text, lang))
             .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(tapIntent(context, notice.tap, notice.tab))
             .apply {
                 noticeActions(notice.tap, notice.speaker, notice.microphone, notice.forward).forEach { action ->
-                    addAction(NotificationCompat.Action.Builder(0, action.label, actionIntent(context, action, notice)).build())
+                    addAction(NotificationCompat.Action.Builder(0, L10n.translate(action.label, lang), actionIntent(context, action, notice)).build())
                 }
             }
             .build()

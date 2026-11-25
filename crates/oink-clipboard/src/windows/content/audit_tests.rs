@@ -422,3 +422,79 @@ fn portable_png_reuses_original_bytes_before_dib_conversion() {
         }
     }
 }
+
+#[test]
+fn screenshot_sync_writes_eager_png_and_dib_hglobal_to_clipboard() {
+    super::tests::sta(|| {
+        let png_bytes = crate::dnd::preview::asymmetric_png();
+        let mut inventory = crate::content::tests::fixture().inventory();
+        inventory.platform = ClipPlatform::Windows;
+        inventory.items[0].representations = vec![Representation {
+            id: RepresentationId(1),
+            format: NativeFormat::WindowsRegistered("PNG".into()),
+            medium: Medium::Stream,
+            aspect: DVASPECT_CONTENT.0,
+            index: -1,
+            standard: Some(StandardFormat::Png),
+            data: RepresentationData::Reader {
+                size: ContentSize::Known(png_bytes.len() as u64),
+            },
+        }];
+        let map = Arc::new(std::collections::HashMap::from([(RepresentationId(1), png_bytes.clone())]));
+        let provider = content::clipboard::Clipboard::new(
+            inventory.clone(),
+            Box::new(move |id| {
+                Ok(Box::new(io::Cursor::new(
+                    map.get(&id)
+                        .ok_or_else(|| content::unavailable(Unavailable::NoSuchItem))?
+                        .clone(),
+                )))
+            }),
+            Arc::new(|| Ok(())),
+            Arc::new(WindowsTranslator),
+            None,
+        )
+        .unwrap();
+        let spec = NativeSpec {
+            inventory: provider.inventory(),
+            contents: provider,
+            files: Vec::new(),
+            file_contents: None,
+            sensitivity: crate::Sensitivity::Normal,
+        };
+        let payload = super::target::try_build_eager_image_clipboard(&spec)
+            .expect("screenshot image should synthesize synchronous HGLOBAL clipboard formats");
+        let formats = super::super::formats();
+        let png_out = payload
+            .iter()
+            .find(|(cf, _)| *cf == formats.png)
+            .map(|(_, b)| b)
+            .expect("PNG format must be written eagerly");
+        assert_eq!(png_out, &png_bytes);
+        let dibv5_out = payload
+            .iter()
+            .find(|(cf, _)| *cf == 17)
+            .map(|(_, b)| b)
+            .expect("CF_DIBV5 must be written eagerly");
+        assert!(!dibv5_out.is_empty());
+        assert!(super::super::image::dib_to_png(dibv5_out).is_ok());
+        let dib_out = payload
+            .iter()
+            .find(|(cf, _)| *cf == 8)
+            .map(|(_, b)| b)
+            .expect("CF_DIB must be written eagerly");
+        assert!(!dib_out.is_empty());
+        assert!(super::super::image::dib_to_png(dib_out).is_ok());
+
+        let target = super::target::build(spec).unwrap();
+        let hglobal_formats: Vec<u16> = target
+            .formats()
+            .into_iter()
+            .filter(|f| f.tymed == TYMED_HGLOBAL.0 as u32)
+            .map(|f| f.cfFormat)
+            .collect();
+        assert!(hglobal_formats.contains(&(formats.png as u16)));
+        assert!(hglobal_formats.contains(&8));
+        assert!(hglobal_formats.contains(&17));
+    });
+}

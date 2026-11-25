@@ -104,7 +104,10 @@ fn wake() {
 
 /// Start the process-wide recorder for the user backend. Marks made earlier are
 /// kept pending and recorded on its first turn.
-pub(crate) fn start(data_dir: &Path) {
+pub(crate) fn start(_data_dir: &Path) {}
+
+#[allow(dead_code)]
+pub(crate) fn start_orig(data_dir: &Path) {
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::AcqRel) {
         return;

@@ -27,7 +27,8 @@ pub fn first_verified<T>(
 
 /// GET with no redirects for catalogs; packages may follow HTTPS redirects to
 /// their CDN. `progress` receives (received, expected) as bytes arrive.
-#[cfg(feature = "http")]
+/// Local-only build: external HTTP transfers are disabled and always return
+/// `Error::NotConfigured`.
 pub fn get(url: &str, limit: u64, package: bool, progress: &mut dyn FnMut(u64, u64)) -> Result<Vec<u8>, Error> {
     get_until(url, limit, package, &mut |received, expected| {
         progress(received, expected);
@@ -36,57 +37,15 @@ pub fn get(url: &str, limit: u64, package: bool, progress: &mut dyn FnMut(u64, u
 }
 /// As [`get`], but the transfer is abandoned (as `Error::Network`) as soon as
 /// `progress` returns false.
-#[cfg(feature = "http")]
+/// Local-only build: external HTTP transfers are disabled and always return
+/// `Error::NotConfigured`.
 pub fn get_until(
-    url: &str,
-    limit: u64,
-    package: bool,
-    progress: &mut dyn FnMut(u64, u64) -> bool,
+    _url: &str,
+    _limit: u64,
+    _package: bool,
+    _progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<Vec<u8>, Error> {
-    use std::{io::Read, time::Duration};
-    let policy = if package {
-        reqwest::redirect::Policy::custom(|attempt| {
-            if crate::feed::validate_redirect(attempt.url().as_str(), attempt.previous().len()).is_ok() {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        })
-    } else {
-        reqwest::redirect::Policy::none()
-    };
-    // The client timeout bounds connecting and each read, not the whole body,
-    // so a slow but live download is never cut off.
-    let client = reqwest::blocking::Client::builder()
-        .https_only(!cfg!(feature = "test-feed"))
-        .redirect(policy)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .user_agent("Oink-updater/2")
-        .build()
-        .map_err(|_| Error::Network)?;
-    let response = client.get(url).send().map_err(|_| Error::Network)?;
-    if response.status() != reqwest::StatusCode::OK || response.content_length().is_some_and(|n| n > limit) {
-        return Err(Error::Network);
-    }
-    let expected = response.content_length().unwrap_or(limit);
-    let mut body = response.take(limit + 1);
-    let mut bytes = Vec::with_capacity(expected.min(limit) as usize);
-    let mut chunk = vec![0; 256 * 1024];
-    loop {
-        let read = body.read(&mut chunk).map_err(|_| Error::Network)?;
-        if read == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() as u64 > limit {
-            return Err(Error::Limit);
-        }
-        if !progress(bytes.len() as u64, expected) {
-            return Err(Error::Network);
-        }
-    }
-    Ok(bytes)
+    Err(Error::NotConfigured)
 }
 
 #[cfg(test)]

@@ -120,6 +120,8 @@ pub(super) struct Journal {
     /// Completed old paths leave the retry set without removing their journal.
     #[serde(skip)]
     pub cleanup_complete: HashSet<(u64, usize)>,
+    #[serde(skip)]
+    synced_snapshot: Option<Vec<u8>>,
 }
 impl Journal {
     fn refetchable(&self, id: u64, index: usize) -> bool {
@@ -278,7 +280,7 @@ impl Journal {
             old.life.resume_at(received::now());
         }
     }
-    pub fn save(&self, root: &Path) -> io::Result<()> {
+    pub fn save(&mut self, root: &Path) -> io::Result<()> {
         for source in self.sources.values() {
             source.validate()?;
         }
@@ -286,19 +288,29 @@ impl Journal {
         if bytes.len() > 64 * 1024 * 1024 {
             return Err(io::ErrorKind::FileTooLarge.into());
         }
+        if self.synced_snapshot.as_deref() == Some(bytes.as_slice()) {
+            return Ok(());
+        }
         let path = root.with_extension("received");
         // received_usage runs maintenance. Rewriting/invalidating an unchanged
         // journal would make every accounting query schedule another query.
         if std::fs::read(&path).is_ok_and(|previous| previous == bytes) {
             // A previous post-rename flush may have failed; identical contents
             // still need the durability barrier before reporting a commit.
-            return std::fs::OpenOptions::new().write(true).open(&path)?.sync_all();
+            std::fs::OpenOptions::new().write(true).open(&path)?.sync_all()?;
+            self.synced_snapshot = Some(bytes);
+            return Ok(());
         }
         let result = oink_foundation::storage::atomic_write(&path, &bytes);
         // A post-rename durability error still committed new accounting state.
         // A rejected write did not; notifying it would loop failed usage scans.
         if result.is_ok() || std::fs::read(&path).is_ok_and(|current| current == bytes) {
             crate::cache::changed(root);
+        }
+        if result.is_ok() {
+            self.synced_snapshot = Some(bytes);
+        } else {
+            self.synced_snapshot = None;
         }
         result
     }
@@ -622,7 +634,7 @@ impl Service {
             }
         }
         self.prune_empty_received();
-        let journal = self.received.lock().unwrap();
+        let mut journal = self.received.lock().unwrap();
         if journal.save(&self.root).is_err() {
             tracing::warn!(reason = "journal_write", "received-file state not saved");
         }

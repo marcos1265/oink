@@ -46,8 +46,6 @@ it.each((['before', 'after'] as const).flatMap(order => [true, false].map(receip
   }
   render(<App/>);
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-  await screen.findByText('Help us improve Oink');
-  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   await screen.findByText('Connect your other devices');
   await waitFor(() => expect(document.querySelector('.ob-main')?.hasAttribute('inert')).toBe(false));
   fireEvent.click(screen.getByRole('button', { name: /Connect to Peer/ }));

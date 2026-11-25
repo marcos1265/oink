@@ -1,6 +1,5 @@
 package com.hachiwii.oink
 
-import java.util.Locale
 import uniffi.oink_mobile_ffi.ClipboardFailure
 import uniffi.oink_mobile_ffi.MobileException
 import uniffi.oink_mobile_ffi.TransferFailure
@@ -8,10 +7,7 @@ import uniffi.oink_mobile_ffi.TransferFailure
 internal val Throwable.oinkMessage: String?
     get() = when {
         this is MobileException.Clipboard && reason == ClipboardFailure.UNKNOWN ->
-            if (Locale.getDefault().language == "zh")
-                "在线电脑没有可获取的剪贴板内容。请先在电脑上复制内容，再重试。"
-            else
-                "No clipboard content is available from an online computer. Copy something on the computer, then try again."
+            L10n.translate("在线电脑没有可获取的剪贴板内容。请先在电脑上复制内容，再重试。")
         this is MobileException.Transfer -> transferFailureText(reason)
         else -> message
     }

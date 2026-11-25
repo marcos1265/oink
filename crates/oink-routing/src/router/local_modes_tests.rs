@@ -977,3 +977,176 @@ fn unrecorded_injected_button_up_passes_locally_without_forwarding_or_claiming()
         assert_eq!(r.focus_claim(), claim);
     }
 }
+
+fn contiguous_router() -> Router {
+    let mut layout = crate::SimpleLayout::new();
+    let bounds = Rect::new(0., 0., 1000., 600.);
+    layout.add_screen(ScreenId::new(ME, "screen"), bounds, Rect::new(0., 0., 250., 150.));
+    layout.add_screen(ScreenId::new(PEER, "screen"), bounds, Rect::new(250., 0., 250., 150.));
+    let mut r = Router::new(
+        RouterConfig::new(
+            oink_foundation::session::Boot {
+                device_id: ME,
+                nonce: [ME.0[0]; 16],
+            },
+            "source",
+            Os::Windows,
+        ),
+        Arc::new(layout),
+    );
+    r.set_local_displays(vec![DisplayInfo {
+        key: "screen".into(),
+        name: "screen".into(),
+        bounds,
+        pixel_width: 1000,
+        pixel_height: 600,
+        reference_extent: None,
+        rotation_deg: 0,
+        is_primary: true,
+        is_builtin: false,
+        is_virtual: false,
+    }]);
+    r.set_cursor(Point::new(123., 234.));
+    r.test_connect(PEER, 0);
+    r.peers.get_mut(&PEER).unwrap().focus_ready = true;
+    r.out.clear();
+    r
+}
+
+#[test]
+fn corner_dead_zone_blocks_edge_warp_near_corners_only() {
+    let mut r = contiguous_router();
+    let mut settings = r.config().settings.clone();
+    settings.corner_dead_zone_enabled = true;
+    settings.corner_dead_zone_px = 50;
+    r.set_settings(settings);
+    r.out.clear();
+
+    // Top-right corner (999, 10) is within 50 px of top edge (y=0..50) -> blocked from warping
+    let d_corner = r.on_local_event(
+        &CapturedEvent {
+            event: InputEvent::PointerDelta { dx: 10., dy: 0. },
+            source: SourceKind::Mouse,
+            physical: true,
+            time_us: 100,
+            cursor: Some(Point::new(999., 10.)),
+        },
+        100,
+    );
+    assert_eq!(d_corner, Disposition::Pass);
+    assert_eq!(r.holder, ME);
+
+    // Middle right edge (999, 300) is outside corner dead zone -> warps to PEER
+    let d_mid = r.on_local_event(
+        &CapturedEvent {
+            event: InputEvent::PointerDelta { dx: 10., dy: 0. },
+            source: SourceKind::Mouse,
+            physical: true,
+            time_us: 200,
+            cursor: Some(Point::new(999., 300.)),
+        },
+        200,
+    );
+    assert_eq!(d_mid, Disposition::Swallow);
+    assert_eq!(r.holder, PEER);
+}
+
+#[test]
+fn require_ctrl_to_warp_blocks_without_ctrl_and_allows_with_ctrl() {
+    let mut r = contiguous_router();
+    let mut settings = r.config().settings.clone();
+    settings.require_ctrl_to_warp = true;
+    r.set_settings(settings);
+    r.out.clear();
+
+    // Moving across right edge without Ctrl -> stays local
+    let d_no_ctrl = event(&mut r, InputEvent::PointerDelta { dx: 10., dy: 0. });
+    assert_eq!(d_no_ctrl, Disposition::Pass);
+    assert_eq!(r.holder, ME);
+
+    // Holding Left Ctrl -> allows crossing to PEER
+    event(&mut r, InputEvent::Key { code: KeyCode::LEFT_CTRL, pressed: true });
+    let d_with_ctrl = event(&mut r, InputEvent::PointerDelta { dx: 10., dy: 0. });
+    assert_eq!(d_with_ctrl, Disposition::Swallow);
+    assert_eq!(r.holder, PEER);
+}
+
+#[test]
+fn independent_mouse_hides_on_leave_and_reveals_on_external_input() {
+    let mut r = router(false);
+    let mut settings = r.config().settings.clone();
+    settings.mouse_mode = InputMode::Local;
+    settings.independent_mouse = true;
+    r.set_settings(settings);
+    r.out.clear();
+
+    r.become_source(1, PEER);
+    assert!(
+        r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Remote { .. }))),
+        "leaving screen hides and parks cursor at center to prevent edge clamping"
+    );
+    assert!(r.local_mouse_hidden);
+
+    // External injected input (physical=false, e.g. Sunshine/Moonlight) reveals it.
+    r.out.clear();
+    let d = r.on_local_event(
+        &CapturedEvent {
+            physical: false,
+            event: InputEvent::PointerDelta { dx: 3., dy: 4. },
+            source: SourceKind::Mouse,
+            time_us: 200,
+            cursor: Some(Point::new(200., 200.)),
+        },
+        200,
+    );
+    assert_eq!(d, Disposition::Pass);
+    assert!(r.out.iter().any(|o| matches!(o, Output::RestoreLocal { .. })));
+    assert!(!r.local_mouse_hidden);
+}
+
+#[test]
+fn independent_mouse_disabled_mode_stays_uncovered_on_switch_leave_and_display_change() {
+    let mut r = router(true);
+    let mut settings = r.config().settings.clone();
+    settings.independent_mouse = true;
+    r.set_settings(settings);
+    modes(&mut r, InputMode::Shared, InputMode::Shared);
+    r.out.clear();
+
+    // Switching Shared -> Disabled while focus is remote must uncover for independent mouse.
+    modes(&mut r, InputMode::Disabled, InputMode::Shared);
+    assert!(
+        r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Local))),
+        "Shared -> Disabled with independent_mouse must reveal Local mode"
+    );
+    assert!(
+        !r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Remote { .. }))),
+        "Shared -> Disabled with independent_mouse must not re-park"
+    );
+    assert!(!r.local_mouse_hidden);
+
+    // Switching Local -> Disabled while focus is remote ends in the same uncovered state.
+    modes(&mut r, InputMode::Local, InputMode::Shared);
+    r.out.clear();
+    modes(&mut r, InputMode::Disabled, InputMode::Shared);
+    assert!(!r.local_mouse_hidden);
+    assert!(!r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Remote { .. }))));
+
+    // Leaving local screen while Mouse=Disabled + independent_mouse must not push Remote cover.
+    r.become_holder_at(2, Some(ScreenPos::new(ScreenId::new(ME, "screen"), Point::new(100., 100.))));
+    r.out.clear();
+    r.become_source(3, PEER);
+    assert!(
+        !r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Remote { .. }))),
+        "become_source while Disabled + independent_mouse must not install cursor cover"
+    );
+
+    // Display configuration change while Disabled + independent_mouse must not re-install cover.
+    let displays = r.displays.clone();
+    r.out.clear();
+    r.set_local_displays(displays);
+    assert!(
+        !r.out.iter().any(|o| matches!(o, Output::SetMode(CaptureMode::Remote { .. }))),
+        "set_local_displays while Disabled + independent_mouse must not push Remote cover"
+    );
+}

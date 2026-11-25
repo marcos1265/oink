@@ -39,7 +39,7 @@ import org.robolectric.annotation.Config
  * closes only the second menu and updates the row; a tap outside closes the second menu first.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w412dp-h915dp-xxhdpi", application = android.app.Application::class)
+@Config(sdk = [34], qualifiers = "zh-rCN-w412dp-h915dp-xxhdpi", application = android.app.Application::class)
 class ControlAdjustMenuTest {
     @get:Rule val compose = createComposeRule()
     private val pc = "a".repeat(64)

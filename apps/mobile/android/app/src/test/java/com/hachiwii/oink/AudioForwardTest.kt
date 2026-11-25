@@ -71,8 +71,8 @@ class AudioForwardTest {
         for (tap in NoticeTap.entries) for (speaker in listOf(false, true)) {
             val notice = persistentNotice(AppState(localAudio = LocalAudio(speakerOn = speaker, microphoneOn = true, forwardOn = true), noticeTap = tap))
             assertEquals("0 在线设备 · 转发音频 · 麦克风共享", notice.text)
-            val built = PersistentNotices.build(RuntimeEnvironment.getApplication(), notice)
-            assertEquals(listOf(if (tap == NoticeTap.COPY) "打开 Oink" else "复制内容", "停止转发音频", "停止共享麦克风"), built.actions.map { it.title.toString() })
+            val built = PersistentNotices.build(RuntimeEnvironment.getApplication(), notice, AppLang.ZH)
+            assertEquals(listOf(if (tap == NoticeTap.COPY) "打开 Oink" else "复制内容", "停止转发音频", "退出"), built.actions.map { it.title.toString() })
             assertEquals(PersistentNotices.STOP_FORWARD, shadowOf(built.actions[1].actionIntent).savedIntent.action)
         }
     }

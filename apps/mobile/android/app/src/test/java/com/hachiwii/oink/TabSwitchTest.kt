@@ -1,12 +1,19 @@
 package com.hachiwii.oink
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasScrollToIndexAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToIndex
 import com.hachiwii.oink.ui.*
 import org.junit.Assert.*
 import org.junit.Rule
@@ -104,5 +111,53 @@ class TabSwitchTest {
         compose.onNodeWithContentDescription("设备").performClick()
         compose.waitForIdle()
         assertEquals(1, left)
+    }
+
+    /** Switching Devices -> Control slides past Transfer at newest items, and scrolled position stays stable across tab switches & incoming messages. */
+    @Test fun transferInitializesAtNewestAndPreservesViewedPositionAcrossTabs() {
+        var model by androidx.compose.runtime.mutableStateOf(
+            AppModel(peers = peers, messages = messages, hasOlderMessages = true)
+        )
+        var older = 0
+        compose.setContent {
+            OinkApp(model, UiInit(tab = Tab.Devices), Prefs(scheme = "light"), {}, AppActions(loadOlder = { older++ }), false)
+        }
+        compose.waitForIdle()
+        assertEquals(0, older)
+        // Even before ever visiting Transfer, Transfer already sits at newest (#60), not #1 (so Devices -> Control won't flash #1).
+        compose.onNode(hasText("文件60.pdf"), useUnmergedTree = true).assertExists()
+        compose.onAllNodesWithText("第 1 条消息", substring = true, useUnmergedTree = true).assertCountEquals(0)
+
+        // Open Transfer: newest message (#60) is already shown mid-slide (no flash of #1).
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithContentDescription("传输").performClick()
+        compose.mainClock.advanceTimeBy(100)
+        compose.waitForIdle()
+        compose.onNode(hasText("文件60.pdf")).assertExists()
+        compose.onAllNodesWithText("第 1 条消息", substring = true).assertCountEquals(0)
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        compose.onNode(hasText("文件60.pdf")).assertIsDisplayed()
+
+        // Scroll up to message #8 ("第 8 条消息").
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(8)
+        compose.waitForIdle()
+        compose.onNode(hasText("第 8 条消息", substring = true)).assertIsDisplayed()
+
+        // Switch Transfer -> Devices -> Control -> Transfer: still looking at #8, not reset to #60.
+        compose.onNodeWithContentDescription("设备").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("控制").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("传输").performClick()
+        compose.waitForIdle()
+        compose.onNode(hasText("第 8 条消息", substring = true)).assertIsDisplayed()
+
+        // Incoming message from peer while scrolled up to #8 must not yank scroll position.
+        val incoming = MessageUi(61L, false, "windowsPc", "Windows PC", "windows", true, "text", text = "新到的第 61 条消息", copyable = true, sent = true)
+        model = model.copy(messages = model.messages + incoming)
+        compose.waitForIdle()
+        compose.onNode(hasText("第 8 条消息", substring = true)).assertIsDisplayed()
+        compose.onAllNodesWithText("新到的第 61 条消息").assertCountEquals(0)
     }
 }

@@ -133,6 +133,7 @@ data class Prefs(
     val autoWriteClipboard: Boolean = false, val autoReadClipboard: Boolean = false,
     val speakerTap: com.hachiwii.oink.SpeakerTap = com.hachiwii.oink.SpeakerTap.EXIT,
     val micAutoOff: Int = 5, val speakerAutoOff: Int = 5, val echoCancel: Boolean = true,
+    val lowLatencyAudio: Boolean = false,
     val persistentNotice: Boolean = true, val hideRecents: Boolean = false,
     /** 「点按通知」: copy (从共享剪贴板复制) or open (打开 App at [noticeTab]); user 2026-11-11. */
     val noticeTap: String = "copy", val noticeTab: Tab = Tab.Devices,

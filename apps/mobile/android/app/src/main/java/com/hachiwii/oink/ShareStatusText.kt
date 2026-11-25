@@ -30,8 +30,7 @@ object ShareStatusText {
      * The group's only other device is offline; the share starts by itself once it is online (user
      * 2026-11-11). Chinese breaks after 「Oink」 on purpose (share-anim SPEC §2.1); no final period.
      */
-    fun waitingForTarget(): String = com.hachiwii.oink.ui.appText("对方不在线，请在对方设备打开 Oink\n并确保网络连接畅通",
-        "The other device is offline. Open Oink on it and make sure it's connected to the network")
+    fun waitingForTarget(): String = L10n.translate("对方不在线，请在对方设备打开 Oink\n并确保网络连接畅通")
 
     fun completed(elapsedSeconds: Double, to: String? = null): String {
         val elapsed = if (elapsedSeconds.isFinite()) elapsedSeconds.coerceAtLeast(0.0) else 0.0

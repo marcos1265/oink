@@ -1,10 +1,13 @@
 package com.hachiwii.oink
 
+import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.*
@@ -22,6 +25,8 @@ data class LocalAudio(
     val speakerOn: Boolean = false,
     val microphoneOn: Boolean = false,
     val forwardOn: Boolean = false,
+    val speakerRunning: Boolean = false,
+    val microphoneRunning: Boolean = false,
     val forwardRunning: Boolean = false,
     val mediaGeneration: ULong = 0u,
     val forwardFailure: uniffi.oink_mobile_ffi.MobileMediaFailure = uniffi.oink_mobile_ffi.MobileMediaFailure.NONE,
@@ -36,9 +41,15 @@ data class LocalAudio(
     /**
      * This phone holds the speaker-exit, forwarding or microphone-sender role: a switch is on and the phone has
      * joined the group's audio configuration (the core turns a switch off when another device took
-     * the role). Drives the audio part of the Wi-Fi locks ([followAudioRole]).
+     * the role).
      */
     val audioRole: Boolean get() = joined && (speakerOn || microphoneOn || forwardOn)
+
+    /**
+     * Audio hardware/forwarding is actively streaming right now, driving [followAudioRole] Wi-Fi locks
+     * so armed-but-idle endpoints do not hold high-perf/low-latency Wi-Fi locks continuously.
+     */
+    val audioStreaming: Boolean get() = joined && (speakerRunning || microphoneRunning || forwardRunning)
 }
 
 /** Download (received) or upload (own message) progress of one record. */
@@ -161,6 +172,13 @@ class OinkRepository(private val context: Context) {
         private set
     /** Started activities (main thread); see [activityStarted]. */
     private var visibleActivities = 0
+    private val mutableHasVisibleActivity = MutableStateFlow(false)
+    val hasVisibleActivity: StateFlow<Boolean> = mutableHasVisibleActivity.asStateFlow()
+    private val quittingFlag = AtomicBoolean(false)
+    internal val quitting: Boolean get() = quittingFlag.get()
+    private val quitRequestFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val quitRequests: SharedFlow<Unit> = quitRequestFlow.asSharedFlow()
+    internal var terminateProcess: () -> Unit = { kotlin.system.exitProcess(0) }
     /** A picker or camera Oink launched for the composer is on screen (main thread, review H18). */
     private var picking = false
     private var pickTarget: String? = null
@@ -234,15 +252,19 @@ class OinkRepository(private val context: Context) {
 
     /** Called by OinkApplication for every Activity start/stop (main thread). */
     fun activityStarted() {
-        if (visibleActivities++ == 0) ensureService()
+        if (quitting) return
+        visibleActivities++
+        mutableHasVisibleActivity.value = visibleActivities > 0
+        if (visibleActivities == 1) ensureService()
     }
     fun activityStopped(changingConfigurations: Boolean) {
         visibleActivities = (visibleActivities - 1).coerceAtLeast(0)
+        mutableHasVisibleActivity.value = visibleActivities > 0
         stopServiceIfIdle(changingConfigurations)
     }
     /** Main thread. Without the persistent notification the service runs only while Oink is in use. */
     private fun stopServiceIfIdle(changingConfigurations: Boolean = false) {
-        if (shouldStopService(visibleActivities, changingConfigurations, settings.persistentNotification, picking,
+        if (quitting || shouldStopService(visibleActivities, changingConfigurations, settings.persistentNotification, picking,
                 outgoingActive)) {
             context.stopService(Intent(context, ConnectionService::class.java))
         }
@@ -272,11 +294,35 @@ class OinkRepository(private val context: Context) {
      * only runs while an Oink screen is visible; [activityStopped] stops it.
      */
     fun ensureService() {
+        if (quitting) return
         val intent = Intent(context, ConnectionService::class.java)
         if (settings.persistentNotification) {
             ContextCompat.startForegroundService(context, intent.putExtra(ConnectionService.EXTRA_FOREGROUND, true))
         } else if (visibleActivities > 0) {
             context.startService(intent)
+        }
+    }
+
+    /** Cleanly stops background services, shuts down Rust core, closes tasks and exits the process. */
+    fun quitApp() {
+        if (!quittingFlag.compareAndSet(false, true)) return
+        quitRequestFlow.tryEmit(Unit)
+        scope.launch {
+            runCatching { stagingJob?.cancel() }
+            runCatching { context.stopService(Intent(context, ConnectionService::class.java)) }
+            runCatching { withTimeoutOrNull(1500) { stopCore() } }
+            withContext(Dispatchers.Main) {
+                runCatching { context.getSystemService(NotificationManager::class.java)?.cancelAll() }
+                runCatching { context.stopService(Intent(context, ConnectionService::class.java)) }
+                quitRequestFlow.tryEmit(Unit)
+                runCatching {
+                    context.getSystemService(ActivityManager::class.java)?.appTasks?.forEach { task ->
+                        runCatching { task.finishAndRemoveTask() }
+                    }
+                }
+                delay(80)
+                terminateProcess()
+            }
         }
     }
     /** Compatibility alias for older UI callers; service startup is automatic. */
@@ -354,7 +400,9 @@ class OinkRepository(private val context: Context) {
                     else withContext(Dispatchers.Main) {
                         // Android queues distinct text Toast instances in order, including tile actions
                         // while Oink has no visible Activity. No app overlay is added to the system shade.
-                        messages.forEach { android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show() }
+                        messages.forEach {
+                            android.widget.Toast.makeText(context, L10n.translate(it), android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                     if (value.forwardFailure != uniffi.oink_mobile_ffi.MobileMediaFailure.NONE && (value.forwardFailure != before.forwardFailure || completedAttempt)) {
                         pendingForwardHaptic = false
@@ -623,6 +671,10 @@ class OinkRepository(private val context: Context) {
     private var forwardAttemptGeneration: ULong? = null
     fun speakerPressed(long: Boolean = false) {
         val audio = state.value.localAudio
+        if (!long && audio.speakerOn && audio.speaker == MobileEndpointState.FAILED) {
+            setLocalSpeaker(true)
+            return
+        }
         when (speakerAction(audio.speakerOn, audio.forwardOn, state.value.captureReady, settings.speakerTap, long)) {
             SpeakerAction.REJECT -> { notice("转发音频仅在特权模式可用"); speakerHaptics.tryEmit(false) }
             SpeakerAction.OFF -> { pendingForwardHaptic = false; setLocalForward(false); setLocalSpeaker(false) }
@@ -710,6 +762,10 @@ class OinkRepository(private val context: Context) {
     fun setEchoCancellation(enabled: Boolean) = command { bridge ->
         bridge.setEchoCancellation(enabled)
         mutableState.update { it.copy(audioSettings = bridge.audioSettings()) }
+    }
+    fun setLowLatencyAudio(enabled: Boolean) {
+        settings.lowLatencyAudio = enabled
+        audioOwner?.setLowLatencyOutput(enabled)
     }
     fun refreshCacheBytes() = scope.launch {
         runCatching { history().cachedBytes() }.onSuccess { bytes -> mutableState.update { it.copy(cacheBytes = bytes) } }
@@ -1284,6 +1340,8 @@ internal fun localAudio(media: MobileMediaState, self: MobileAudioState?) = Loca
     speakerOn = media.enabledMask.toInt() and 1 != 0,
     microphoneOn = media.enabledMask.toInt() and 2 != 0,
     forwardOn = media.enabledMask.toInt() and 4 != 0,
+    speakerRunning = media.runningMask.toInt() and 1 != 0,
+    microphoneRunning = media.runningMask.toInt() and 2 != 0,
     forwardRunning = media.runningMask.toInt() and 4 != 0,
     mediaGeneration = media.generation,
     forwardFailure = media.failures[2],

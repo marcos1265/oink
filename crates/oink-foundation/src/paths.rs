@@ -72,6 +72,9 @@ impl StoragePaths {
     }
 
     fn platform() -> Self {
+        if let Some(root) = portable_root() {
+            return Self::isolated(root.join("data"));
+        }
         #[cfg(target_os = "macos")]
         {
             Self::macos(&home())
@@ -110,6 +113,24 @@ pub fn cache_dir() -> PathBuf {
 }
 pub fn log_dir() -> PathBuf {
     StoragePaths::current().logs
+}
+
+/// Directory containing `portable.txt` next to `exe_dir`, when running portable.
+pub fn portable_root_in(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .join("portable.txt")
+        .is_file()
+        .then(|| exe_dir.to_path_buf())
+}
+
+/// Directory containing `portable.txt` next to the current executable, when running portable.
+pub fn portable_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    portable_root_in(exe.parent()?)
+}
+
+pub fn is_portable_mode() -> bool {
+    portable_root().is_some()
 }
 
 #[cfg(not(windows))]
@@ -163,5 +184,20 @@ mod tests {
         assert_eq!(log_dir(), roots.logs);
         assert_eq!(cache_dir(), roots.cache);
         assert_eq!(StoragePaths::explicit(), Some(&roots));
+    }
+
+    #[test]
+    fn portable_marker_detects_root_and_uses_data_subfolder() {
+        let dir = std::env::temp_dir().join(format!("oink-portable-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(portable_root_in(&dir), None);
+        std::fs::write(dir.join("portable.txt"), b"").unwrap();
+        assert_eq!(portable_root_in(&dir), Some(dir.clone()));
+        let portable = StoragePaths::isolated(dir.join("data"));
+        assert_eq!(portable.data, dir.join("data"));
+        assert_eq!(portable.cache, dir.join("data").join("Cache"));
+        assert_eq!(portable.logs, dir.join("data").join("Logs"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

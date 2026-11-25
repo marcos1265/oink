@@ -15,23 +15,145 @@ pub const STOP_SERVICE_ARG: &str = "--stop-service";
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Frontend API calls wait asynchronously while the broker retires the old
 /// process. Shell menus and Quit remain independent of backend readiness.
+#[derive(Debug, Clone, PartialEq)]
+enum Phase {
+    Starting,
+    #[cfg(windows)]
+    Waiting(String),
+    Finished(Result<(), String>),
+}
 #[derive(Debug)]
-pub(crate) struct Startup(tokio::sync::watch::Sender<Option<Result<(), String>>>);
+pub(crate) struct Startup(
+    tokio::sync::watch::Sender<Phase>,
+    #[cfg(windows)] std::sync::atomic::AtomicU64,
+);
 impl Startup {
     pub(crate) fn new(pending: bool) -> Self {
-        Self(tokio::sync::watch::channel(if pending { None } else { Some(Ok(())) }).0)
+        Self(
+            tokio::sync::watch::channel(if pending {
+                Phase::Starting
+            } else {
+                Phase::Finished(Ok(()))
+            })
+            .0,
+            #[cfg(windows)]
+            Default::default(),
+        )
     }
     pub(crate) fn ready(&self) -> bool {
-        matches!(*self.0.borrow(), Some(Ok(())))
+        matches!(*self.0.borrow(), Phase::Finished(Ok(())))
     }
     #[cfg(any(windows, test))]
     pub(crate) fn finish(&self, result: Result<(), String>) {
-        self.0.send_replace(Some(result));
+        self.0.send_replace(Phase::Finished(result));
+    }
+    #[cfg(windows)]
+    pub(crate) fn waiting(&self, detail: String) {
+        self.0.send_if_modified(|phase| {
+            let next = Phase::Waiting(detail);
+            if *phase == next {
+                return false;
+            }
+            *phase = next;
+            true
+        });
+    }
+    pub(crate) async fn status_after(&self, previous: Option<String>) -> String {
+        let mut rx = self.0.subscribe();
+        loop {
+            let current = match &*rx.borrow_and_update() {
+                Phase::Starting => "starting".into(),
+                #[cfg(windows)]
+                Phase::Waiting(detail) => detail.clone(),
+                Phase::Finished(Ok(())) => "ready".to_owned(),
+                Phase::Finished(Err(error)) => error.clone(),
+            };
+            if previous.as_ref() != Some(&current) {
+                return current;
+            }
+            if rx.changed().await.is_err() {
+                return "backend_startup_cancelled".into();
+            }
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn session_revision(&self) -> u64 {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
+    #[cfg(windows)]
+    pub(crate) fn session_activated(&self) {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.retry(true);
+    }
+    #[cfg(windows)]
+    pub(crate) fn retry(&self, session_change: bool) {
+        self.0.send_if_modified(|state| {
+            if let Phase::Finished(Err(error)) = state {
+                let allowed = if session_change {
+                    error.starts_with("startup_session:")
+                } else {
+                    [
+                        "startup_stopped:",
+                        "startup_disabled:",
+                        "startup_session:",
+                        "backend_exited:",
+                    ]
+                    .iter()
+                    .any(|code| error.starts_with(code))
+                        || error == "oink_update_in_progress"
+                };
+                if allowed {
+                    *state = Phase::Starting;
+                    return true;
+                }
+            }
+            false
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) async fn wait_for_retry(&self, error: String) {
+        let reason = error
+            .split_once(':')
+            .and_then(|(code, _)| code.strip_prefix("startup_"));
+        if let Some(expected @ ("missing" | "stopped" | "disabled")) = reason {
+            let (wake, mut changes) = tokio::sync::watch::channel(());
+            let watch = oink_winsvc::backend::watch_startup(expected == "missing", move || {
+                wake.send_replace(());
+            });
+            let registration_disappeared = watch
+                .as_ref()
+                .err()
+                .is_some_and(|e| matches!(e.raw_os_error(), Some(1060 | 1072)));
+            loop {
+                if registration_disappeared
+                    || oink_winsvc::backend::startup_reason().is_ok_and(|current| current != expected)
+                {
+                    self.0.send_if_modified(|state| {
+                        if matches!(state, Phase::Finished(Err(old)) if old == &error) {
+                            *state = Phase::Starting;
+                            return true;
+                        }
+                        false
+                    });
+                    return;
+                }
+                if let Err(e) = &watch {
+                    tracing::warn!(%e, "SCM startup notification unavailable");
+                    break;
+                }
+                tokio::select! {
+                    _ = self.status_after(Some(error.clone())) => return,
+                    change = changes.changed() => if change.is_err() {break;},
+                }
+            }
+        }
+        self.status_after(Some(error)).await;
     }
     pub(crate) async fn wait(&self) -> Result<(), String> {
         let mut state = self.0.subscribe();
         loop {
-            if let Some(result) = state.borrow().clone() {
+            if let Phase::Finished(result) = state.borrow().clone() {
                 return result;
             }
             state
@@ -98,25 +220,57 @@ pub fn dispatch_args() -> Option<ExitCode> {
     }
 }
 
-/// Startup only; a Windows UI requests the SYSTEM launch broker exactly once.
 #[cfg(windows)]
-pub fn start_once(api: &RemoteApi, exe: &Path) -> Result<(), String> {
+enum StartedBackend {
+    Tracked(oink_winsvc::backend::StartedProcess),
+    Child(std::process::Child),
+}
+
+#[cfg(windows)]
+impl StartedBackend {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Tracked(p) => p.id(),
+            Self::Child(c) => c.id(),
+        }
+    }
+    fn exit_code(&mut self) -> std::io::Result<Option<u32>> {
+        match self {
+            Self::Tracked(p) => p.exit_code(),
+            Self::Child(c) => c
+                .try_wait()
+                .map(|status| status.map(|s| s.code().unwrap_or(1) as u32)),
+        }
+    }
+}
+
+/// Startup only; a Windows UI requests the SYSTEM launch broker once, or launches locally in portable mode.
+#[cfg(windows)]
+pub fn start_once(api: &RemoteApi, waiting: impl FnMut(String)) -> Result<(), String> {
     let mut seen_owner = false;
-    let launched = match oink_agent::instance::is_running(api.data_dir()) {
+    let mut launched = match oink_agent::instance::is_running(api.data_dir()) {
         Some(true) => {
             seen_owner = true;
             None
         }
-        Some(false) => Some(
-            oink_agent::backend::launch::start_backend_tracked(api.data_dir())
-                .map_err(|e| format!("UIAccess backend launch failed: {e}"))?,
-        ),
+        Some(false) if oink_foundation::paths::is_portable_mode() => {
+            let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+            let mut command = Command::new(exe);
+            command.arg(SERVICE_ARG);
+            command.env("OINK_HOME", api.data_dir());
+            Some(StartedBackend::Child(
+                oink_agent::backend::launch::spawn_detached(&mut command)
+                    .map_err(|e| format!("Portable backend launch failed: {e}"))?,
+            ))
+        }
+        Some(false) => Some(StartedBackend::Tracked(
+            oink_winsvc::backend::start_observed(api.data_dir(), waiting).map_err(|e| e.to_string())?,
+        )),
         None => return Err("backend_ownership_unavailable".into()),
     };
-    let _ = exe;
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Some(process) = &launched
+        if let Some(process) = &mut launched
             && let Some(code) = process
                 .exit_code()
                 .map_err(|e| format!("backend exit query failed: {e}"))?
@@ -155,6 +309,9 @@ pub fn start_once(api: &RemoteApi, exe: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn validate_running_backend(_api: &RemoteApi) -> Result<(), String> {
+    if oink_foundation::paths::is_portable_mode() {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         use oink_agent::api::AgentApi;

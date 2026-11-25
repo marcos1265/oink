@@ -12,7 +12,10 @@ use std::{
     collections::HashSet,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -40,6 +43,7 @@ pub struct Store {
     state: Arc<Mutex<Journal>>,
     pub bytes: Arc<RetainedClips>,
     policy: crate::policy::SharingPolicy,
+    revision: AtomicU64,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,6 +81,7 @@ impl Store {
             state: Arc::new(Mutex::new(state)),
             bytes: Arc::new(RetainedClips::history(cache)),
             policy,
+            revision: AtomicU64::new(1),
         });
         store.reset_group(group)?;
         {
@@ -115,8 +120,16 @@ impl Store {
         }
         Ok(store)
     }
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+    fn bump_revision(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+    }
     fn save(&self, state: &Journal) -> io::Result<()> {
-        oink_foundation::storage::atomic_write(&self.path, &serde_json::to_vec(state)?)
+        oink_foundation::storage::atomic_write(&self.path, &serde_json::to_vec(state)?)?;
+        self.bump_revision();
+        Ok(())
     }
     pub fn contains(&self, id: OfferId) -> bool {
         self.state.lock().unwrap().window.get(id).is_some()
@@ -187,11 +200,14 @@ impl Store {
         }
         next.payloads = kept;
         self.save(&next)?;
+        let retired_before = next.retired.len();
         next.retired.retain(|payload| !self.remove_payload(payload));
         for id in &evicted {
             let _ = self.bytes.forget(*id);
         }
-        self.save(&next)?;
+        if next.retired.len() != retired_before {
+            self.save(&next)?;
+        }
         *state = next;
         Ok(evicted)
     }
@@ -200,12 +216,20 @@ impl Store {
         if state.retired.is_empty() {
             return Ok(());
         }
+        let before = state.retired.len();
         state.retired.retain(|payload| !self.remove_payload(payload));
+        if state.retired.len() == before {
+            return Ok(());
+        }
         self.save(&state)
     }
     pub fn retain_pc_holders(&self, members: &HashSet<DeviceId>) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        let before = state.window.holders().len();
         state.window.retain_pc_holders(members);
+        if state.window.holders().len() == before {
+            return Ok(());
+        }
         self.save(&state)
     }
     pub fn holder(
@@ -290,6 +314,7 @@ impl Store {
                     .and_then(|mut reader| self.bytes.retain(inventory.id, item.id.0, rep.id.0, &mut reader));
                 match result {
                     Ok(size) => {
+                        self.bump_revision();
                         rep.data = RepresentationData::Reader {
                             size: ContentSize::Known(size),
                         }
@@ -332,6 +357,7 @@ impl Store {
             return Ok(());
         };
         self.bytes.retain(inventory.id, item.id.0, rep.0, reader)?;
+        self.bump_revision();
         // A downloaded bitmap is a holder for bitmap bytes, not for its
         // neighbouring file attachment. Only origins/proxies hold file roots.
         let mut portable = inventory.clone();
@@ -422,6 +448,7 @@ impl Store {
                 let data = if let Some(p) = payload {
                     self.bytes
                         .retain(record.id, i.id, f.representation, &mut io::Cursor::new(&p.bytes))?;
+                    self.bump_revision();
                     RepresentationData::Reader {
                         size: ContentSize::Known(p.bytes.len() as u64),
                     }
@@ -555,45 +582,51 @@ impl Store {
     }
     /// Metadata remains. Protect newest ten; reclaim remaining payloads largest first.
     pub fn enforce_cap(&self, cap: u64) -> io::Result<Vec<h::HolderEntry>> {
-        let candidates = {
+        let entries = {
             let state = self.state.lock().unwrap();
-            let mut list = vec![];
-            for (rank, r) in state.window.records().iter().enumerate() {
-                let proxy = state
-                    .payloads
-                    .iter()
-                    .find(|p| p.id == r.id)
-                    .and_then(|p| p.proxy.clone());
-                let references = state
-                    .payloads
-                    .iter()
-                    .find(|p| p.id == r.id)
-                    .map(|p| p.refs.as_slice())
-                    .unwrap_or_default();
-                let external = proxy.as_ref().is_some_and(|path| {
-                    !references.is_empty()
-                        && references
-                            .iter()
-                            .all(|reference| reference.resolve().is_ok_and(|target| !target.starts_with(path)))
-                });
-                let size = self.bytes.bytes(r.id).saturating_add(
-                    proxy
-                        .as_ref()
-                        .and_then(|p| {
-                            if external {
-                                proxy_representation_bytes(p).ok()
-                            } else {
-                                data_bytes(p).ok()
-                            }
-                        })
-                        .unwrap_or(0),
-                );
-                list.push((r.id, rank, size, proxy, external));
-            }
-            list
+            state
+                .window
+                .records()
+                .iter()
+                .enumerate()
+                .map(|(rank, r)| {
+                    let payload = state.payloads.iter().find(|p| p.id == r.id);
+                    (
+                        r.id,
+                        rank,
+                        payload.and_then(|p| p.proxy.clone()),
+                        payload.map(|p| p.refs.clone()).unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
         };
-        let mut total: u64 = candidates.iter().map(|c| c.2).sum();
-        let mut candidates = candidates;
+        let mut candidates = Vec::with_capacity(entries.len());
+        let mut total: u64 = 0;
+        for (id, rank, proxy, references) in entries {
+            let external = proxy.as_ref().is_some_and(|path| {
+                !references.is_empty()
+                    && references
+                        .iter()
+                        .all(|reference| reference.resolve().is_ok_and(|target| !target.starts_with(path)))
+            });
+            let size = self.bytes.bytes(id).saturating_add(
+                proxy
+                    .as_ref()
+                    .and_then(|p| {
+                        if external {
+                            proxy_representation_bytes(p).ok()
+                        } else {
+                            data_bytes(p).ok()
+                        }
+                    })
+                    .unwrap_or(0),
+            );
+            total = total.saturating_add(size);
+            candidates.push((id, rank, size, proxy, external));
+        }
+        if total <= cap {
+            return Ok(vec![]);
+        }
         candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
         let mut released = vec![];
         for (id, rank, size, proxy, external) in candidates {
@@ -613,6 +646,7 @@ impl Store {
             if !self.bytes.forget(id)? {
                 continue;
             }
+            self.bump_revision();
             total = total.saturating_sub(size);
             let keep_files = proxy.is_none() && self.scope(id).0 & h::HolderScope::FILES.0 != 0;
             {
@@ -1060,5 +1094,58 @@ mod tests {
         s.ingest_inline(&secret).unwrap();
         assert_eq!(s.bytes.bytes(secret.id), 0);
         assert!(s.provider(secret.id, None).is_none());
+    }
+
+    #[test]
+    fn noop_retain_pc_holders_and_cleanup_do_not_rewrite_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let s = store(root.path());
+        let mut r = record(1);
+        inline(&mut r, 16);
+        let holder = h::HolderEntry {
+            record_id: r.id,
+            holder: DeviceId([1; 32]),
+            rev: 1,
+            state: h::HolderState::Holding,
+            scope: h::HolderScope::TEXT,
+        };
+        s.merge(vec![r.clone()], vec![holder]).unwrap();
+        let rev_before = s.revision();
+        let json_path = root.path().join("clipboard-history.json");
+        std::fs::write(&json_path, b"sentinel").unwrap();
+
+        let members = HashSet::from([DeviceId([1; 32])]);
+        s.retain_pc_holders(&members).unwrap();
+        assert_eq!(s.revision(), rev_before);
+        assert_eq!(std::fs::read(&json_path).unwrap(), b"sentinel");
+
+        // An unremovable retired entry does not trigger repeated journal rewrites either.
+        let lock_dir = root.path().join("locked-proxy");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let locked_file = lock_dir.join("in-use.bin");
+        let _open = std::fs::File::create(&locked_file).unwrap();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.retired.push(Payload {
+                id: OfferId {
+                    clip: ClipId {
+                        origin: DeviceId([1; 32]),
+                        seq: 99,
+                    },
+                    generation: 1,
+                },
+                inventory: vec![],
+                proxy: Some(lock_dir.clone()),
+                files_gone: false,
+                refs: vec![],
+                head_only: false,
+            });
+        }
+        std::fs::write(&json_path, b"sentinel").unwrap();
+        s.cleanup().unwrap();
+        if s.state.lock().unwrap().retired.len() == 1 {
+            assert_eq!(s.revision(), rev_before);
+            assert_eq!(std::fs::read(&json_path).unwrap(), b"sentinel");
+        }
     }
 }

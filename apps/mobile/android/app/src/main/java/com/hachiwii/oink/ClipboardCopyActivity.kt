@@ -32,6 +32,7 @@ class ClipboardCopyActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        L10n.sync(this)
         super.onCreate(savedInstanceState)
         noAnimation(open = true)
         lifecycleScope.launch {
@@ -52,7 +53,7 @@ class ClipboardCopyActivity : ComponentActivity() {
         }
     }
 
-    private fun toast(text: String) = Toast.makeText(applicationContext, text, Toast.LENGTH_SHORT).show()
+    private fun toast(text: String) = Toast.makeText(applicationContext, L10n.translate(text), Toast.LENGTH_SHORT).show()
 
     @Suppress("DEPRECATION")
     private fun noAnimation(open: Boolean) {

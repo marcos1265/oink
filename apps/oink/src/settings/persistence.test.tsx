@@ -382,3 +382,31 @@ it('saves Paste as File only through local preferences and restores its value',a
   const restored=renderHook(usePreferences);
   expect(restored.result.current.prefs.pasteAsFile).toBe(false);
 });
+
+it('defaults and persists corner dead zone, hold-Ctrl warp, and independent mouse settings', async () => {
+  mocks.input.mockImplementation(async patch => {
+    mocks.state = { ...mocks.state, input: { ...(mocks.state.input as object), ...patch } };
+    mocks.listeners.forEach(listener => listener());
+  });
+  const mounted = renderHook(usePreferences);
+  expect(mounted.result.current.prefs.cornerDeadZoneEnabled).toBe(false);
+  expect(mounted.result.current.prefs.cornerDeadZonePx).toBe('50');
+  expect(mounted.result.current.prefs.requireCtrlToWarp).toBe(false);
+  expect(mounted.result.current.prefs.independentMouse).toBe(false);
+
+  await act(async () => mounted.result.current.set('cornerDeadZoneEnabled', true));
+  expect(mocks.input).toHaveBeenCalledWith({ corner_dead_zone_enabled: true });
+  await act(async () => mounted.result.current.set('cornerDeadZonePx', '120'));
+  expect(mocks.input).toHaveBeenCalledWith({ corner_dead_zone_px: 120 });
+  await act(async () => mounted.result.current.set('requireCtrlToWarp', true));
+  expect(mocks.input).toHaveBeenCalledWith({ require_ctrl_to_warp: true });
+  await act(async () => mounted.result.current.set('independentMouse', true));
+  expect(mocks.input).toHaveBeenCalledWith({ independent_mouse: true });
+
+  mounted.unmount();
+  const reloaded = renderHook(usePreferences);
+  expect(reloaded.result.current.prefs.cornerDeadZoneEnabled).toBe(true);
+  expect(reloaded.result.current.prefs.cornerDeadZonePx).toBe('120');
+  expect(reloaded.result.current.prefs.requireCtrlToWarp).toBe(true);
+  expect(reloaded.result.current.prefs.independentMouse).toBe(true);
+});

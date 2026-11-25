@@ -113,7 +113,7 @@ export function usePreferences(): PrefsApi {
     setPrefs(p=>{
       const next:Prefs={...p,
         ...(local?{notificationLevel:local.notification_level,showInMenuBar:local.show_status_icon,confirmQuit:local.confirm_quit,pasteAsFile:local.paste_as_file,language:local.ui_language,logLevel:local.log_level,logMaxMb:String(local.log_max_mb)}:{}),
-        ...(state.input?{pollLimit:state.input.event_frequency==='unlimited'?'none':state.input.event_frequency.slice(2) as Prefs['pollLimit'],keepAwake:state.input.wake_displays_on_input,pointerTrail:state.input.cursor_trail,touchpadInject:state.input.touchpad_injection_enabled,nativeMultifinger:state.input.native_multifinger??true,macScrollFeel:state.input.mac_scroll_feel,forwardWheelByLines:state.input.forward_wheel_by_lines??true,forwardInjectedInput:state.input.forward_injected_input??true,takeForegroundOnLeave:state.input.take_foreground_on_leave??false,quickerCompat:state.input.quicker_compat??false,syncUnlock:state.input.sync_unlock_others??false,pointerGain:state.input.device_gain,escStop:state.input.emergency_hold_ms!==0,
+        ...(state.input?{pollLimit:state.input.event_frequency==='unlimited'?'none':state.input.event_frequency.slice(2) as Prefs['pollLimit'],keepAwake:state.input.wake_displays_on_input,pointerTrail:state.input.cursor_trail,touchpadInject:state.input.touchpad_injection_enabled,nativeMultifinger:state.input.native_multifinger??true,macScrollFeel:state.input.mac_scroll_feel,forwardWheelByLines:state.input.forward_wheel_by_lines??true,forwardInjectedInput:state.input.forward_injected_input??true,takeForegroundOnLeave:state.input.take_foreground_on_leave??false,quickerCompat:state.input.quicker_compat??false,cornerDeadZoneEnabled:state.input.corner_dead_zone_enabled??false,cornerDeadZonePx:String(state.input.corner_dead_zone_px??50),requireCtrlToWarp:state.input.require_ctrl_to_warp??false,independentMouse:state.input.independent_mouse??false,syncUnlock:state.input.sync_unlock_others??false,pointerGain:state.input.device_gain,escStop:state.input.emergency_hold_ms!==0,
           shortcuts:{...Object.fromEntries(Object.entries(p.shortcuts).filter(([id])=>!id.startsWith('move:'))),...Object.fromEntries(state.input.hotkeys.filter(h=>shortcutId(h)).map(h=>[shortcutId(h),{on:h.enabled,keys:h.keys.map(k=>k==='Ctrl'?'Control':k).join('+')}]))}} as const:{}),
         ...(state.clipboard?{clipReceive:state.clipboard.receive ?? true,clipSend:state.clipboard.send ?? true,clipDedupe:state.clipboard.dedupe ?? true,removeDsStore:state.clipboard.remove_ds_store ?? true}:{}),
         ...(state.audio?{audioEncodingQuality:state.audio.settings.quality??'quality',keepLocalPlayback:state.audio.settings.keep_local_playback,echoCancellation:state.audio.settings.echo_cancellation ?? true,audioDevice:state.audio.settings.receive_output??'default'}:{}),
@@ -143,7 +143,7 @@ export function usePreferences(): PrefsApi {
       const current=agent.get(), appliedLocal=current.localPreferences;
       if(changed('launchAtLogin')){await agent.query('launch',()=>api.setLaunchAtLogin(next.launchAtLogin));next={...next,launchAtLogin:['enabled','requires_approval'].includes(agent.get().launch?.state??'')};}
       if(changed('diagnostics'))await api.setDiagnosticsEnabled(next.diagnostics);
-      if((['pollLimit','keepAwake','pointerTrail','touchpadInject','nativeMultifinger','macScrollFeel','forwardWheelByLines','forwardInjectedInput','takeForegroundOnLeave','quickerCompat','syncUnlock','escStop','pointerGain','shortcuts'] as const).some(changed)){
+      if((['pollLimit','keepAwake','pointerTrail','touchpadInject','nativeMultifinger','macScrollFeel','forwardWheelByLines','forwardInjectedInput','takeForegroundOnLeave','quickerCompat','cornerDeadZoneEnabled','cornerDeadZonePx','requireCtrlToWarp','independentMouse','syncUnlock','escStop','pointerGain','shortcuts'] as const).some(changed)){
         if(!current.input)throw new Error('unavailable');
         await api.setInputSettings({
           ...(changed('pollLimit')?{event_frequency:next.pollLimit==='none'?'unlimited':`hz${next.pollLimit}`}:{}),
@@ -156,6 +156,10 @@ export function usePreferences(): PrefsApi {
           ...(changed('forwardInjectedInput')?{forward_injected_input:next.forwardInjectedInput}:{}),
           ...(changed('takeForegroundOnLeave')?{take_foreground_on_leave:next.takeForegroundOnLeave}:{}),
           ...(changed('quickerCompat')?{quicker_compat:next.quickerCompat}:{}),
+          ...(changed('cornerDeadZoneEnabled')?{corner_dead_zone_enabled:next.cornerDeadZoneEnabled}:{}),
+          ...(changed('cornerDeadZonePx')?{corner_dead_zone_px:Number(next.cornerDeadZonePx)}:{}),
+          ...(changed('requireCtrlToWarp')?{require_ctrl_to_warp:next.requireCtrlToWarp}:{}),
+          ...(changed('independentMouse')?{independent_mouse:next.independentMouse}:{}),
           ...(changed('syncUnlock')?{sync_unlock_others:next.syncUnlock}:{}),
           ...(changed('escStop')?{emergency_hold_ms:next.escStop?5000:0}:{}),
           ...(changed('pointerGain')?{device_gain:next.pointerGain}:{}),
@@ -190,7 +194,7 @@ export function usePreferences(): PrefsApi {
   return{prefs,pending,launchStatus:state.launch,canEdit: key => {
       if(['pasteAsFile','language','showInMenuBar','confirmQuit','notificationLevel','logLevel','logMaxMb','theme','accent'].includes(key))return local!==null;
       if(['keymap','scrollInvert'].includes(key))return shownTransform!==null;
-      if(['pollLimit','pointerGain','keepAwake','pointerTrail','touchpadInject','nativeMultifinger','macScrollFeel','forwardWheelByLines','forwardInjectedInput','takeForegroundOnLeave','quickerCompat','syncUnlock','escStop'].includes(key)||key.startsWith('sc-'))return state.input!==null;
+      if(['pollLimit','pointerGain','keepAwake','pointerTrail','touchpadInject','nativeMultifinger','macScrollFeel','forwardWheelByLines','forwardInjectedInput','takeForegroundOnLeave','quickerCompat','cornerDeadZoneEnabled','cornerDeadZonePx','requireCtrlToWarp','independentMouse','syncUnlock','escStop'].includes(key)||key.startsWith('sc-'))return state.input!==null;
       if(key.startsWith('clip')||key==='removeDsStore')return state.clipboard!==null;
       if(['audioEncodingQuality','audioDevice','keepLocalPlayback','echoCancellation'].includes(key))return state.audio!==null;
       if(key==='launchAtLogin')return state.launch!==null;

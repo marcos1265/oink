@@ -1556,3 +1556,34 @@ async fn cancel_after_a_stale_revision_uses_the_current_revision() {
     ));
     stop(&nodes).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_desktop_freezes_console_displays_and_first_install_has_no_displays() {
+    let nodes = start(fresh(2)).await;
+    for (i, node) in nodes.iter().enumerate() {
+        if i == 0 {
+            node.group.initialize_displays(vec![display("console")]).unwrap();
+        }
+        if i == 1 {
+            assert!(node.group.local_displays().displays.is_empty());
+        }
+        let before = node.group.applied().layout.clone();
+        node.group
+            .call(|owner| {
+                let mut pause = crate::device_controls::pause::PauseOwner::default();
+                pause.set_remote_desktop(true);
+                owner.local.owner(Vec::new(), pause.state()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let displays = if i == 0 { vec![display("rdp-1920")] } else { Vec::new() };
+        node.group.initialize_displays(displays).unwrap();
+        assert_eq!(node.group.applied().layout, before);
+        assert_eq!(
+            node.group.local_displays().displays.len(),
+            usize::from(i == 0),
+            "console displays are frozen rather than overwritten by RDP or empty lists"
+        );
+    }
+    stop(&nodes).await;
+}

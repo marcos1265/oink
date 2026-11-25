@@ -173,16 +173,19 @@ fun DeviceSheet(peerIn: PeerUi, init: UiInit?, actions: AppActions, onClose: () 
                 Row(Modifier.padding(top = 14.dp).fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                     CompositionLocalProvider(LocalCutout provides c.sheet) { PlatformIcon(peer.platform, privileged = peer.privileged) }
                     Spacer(Modifier.width(12.dp))
-                    T(peer.name, 20f, c.ink, Modifier.weight(1f), weight = 650, lineHeight = 26f)
+                    T(peer.name, 20f, c.ink, Modifier.weight(1f), weight = 650, lineHeight = 26f, raw = true)
                     Spacer(Modifier.width(12.dp))
+                    val lang = com.hachiwii.oink.LocalAppLang.current
+                    val pauseDesc = com.hachiwii.oink.L10n.translate(if (peer.paused) "继续" else "暂停", lang)
+                    val kickDesc = com.hachiwii.oink.L10n.translate("踢出设备", lang)
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         // Phones have no paused state (user 2026-11-11): only the kick button.
                         if (!peer.mobile) Box(Modifier.size(44.dp).press(shape = RoundedCornerShape(14.dp)) { haptic(false)
                             actions.devicePreference(peer, "paused", if (peer.paused) "off" else "on") }
-                            .semantics { contentDescription = if (peer.paused) "继续" else "暂停" }, contentAlignment = Alignment.Center) {
+                            .semantics { contentDescription = pauseDesc }, contentAlignment = Alignment.Center) {
                             if (peer.paused) Lucide(DesignIconData.lucidePlay, 22.dp, c.bad) else SvgIcon(DesignIconData.actionPause, 22.dp, tint = c.bad, stroke = 1.8f)
                         }
-                        Box(Modifier.size(44.dp).press(shape = RoundedCornerShape(14.dp)) { confirmKick = true }.semantics { contentDescription = "踢出设备" }, contentAlignment = Alignment.Center) {
+                        Box(Modifier.size(44.dp).press(shape = RoundedCornerShape(14.dp)) { confirmKick = true }.semantics { contentDescription = kickDesc }, contentAlignment = Alignment.Center) {
                             SvgIcon(DesignIconData.actionLeave, 22.dp, tint = c.bad, stroke = 1.8f)
                         }
                     }
@@ -399,10 +402,11 @@ private fun RoundControl(type: String, mode: String, disabled: Boolean, modifier
     // current callbacks, which close over the current mode, not the ones of its first composition.
     val tap by rememberUpdatedState(onTap)
     val hold by rememberUpdatedState(onHold)
+    val ctrlDesc = com.hachiwii.oink.L10n.translate("${configs.getValue(type).label}：${configs.getValue(type).options.firstOrNull { it.first == mode }?.second ?: "自动"}", com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.scale(scale.value).alpha(if (disabled) .45f else 1f).clip(CircleShape).background(c.control)
         .border(if (strong) 2.dp else 1.dp, if (strong) color else c.track, CircleShape)
         .pressHold(!disabled, true, scale, scope, { tap() }, { hold() })
-        .semantics { contentDescription = "${configs.getValue(type).label}：${configs.getValue(type).options.firstOrNull { it.first == mode }?.second ?: "自动"}" },
+        .semantics { contentDescription = ctrlDesc },
         contentAlignment = Alignment.Center) {
         CompositionLocalProvider(LocalCutout provides c.control) {
             if (type == "locked") Lucide(DesignIconData.lucideLockKeyhole, 28.dp, color)
@@ -442,9 +446,10 @@ private fun AudioControl(type: String, mode: String, level: Int, disabledIn: Boo
             onLevel(pointerVolume(raw, max))
         }
     }
+    val volDesc = com.hachiwii.oink.L10n.translate("${configs.getValue(type).label}音量 ${if (local) "本地，音量固定为零" else "$value%"}", com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.scale(scale.value).alpha(if (disabled) .45f else 1f).clip(RoundedCornerShape(44.dp)).background(c.track).border(1.dp, c.track, RoundedCornerShape(44.dp))
         .pressHold(!disabled, false, scale, scope, {}, { hold() }) { y, h -> drag(y, h) }
-        .semantics { contentDescription = "${configs.getValue(type).label}音量 ${if (local) "本地，音量固定为零" else "$value%"}" }) {
+        .semantics { contentDescription = volDesc }) {
         Box(Modifier.align(Alignment.BottomCenter).padding(1.dp).fillMaxWidth().fillMaxHeight(frac).background(c.level))
         CompositionLocalProvider(LocalCutout provides if (frac > .14f) c.level else c.track) {
             DevIcon(if (type == "speaker") speakerGlyph(volumeWaves(value)) else DesignIconData.pcMicrophone, 28.dp, tint, badge, volume = true,

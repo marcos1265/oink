@@ -169,9 +169,34 @@ private const val NO_TARGET = "请先选择要控制的电脑"
  * the keyboard and touchpad models, and where the keyboard currently is (the pad makes room for it).
  */
 @Stable
-class ControlHolder(val init: ControlInit?, prefs: ControlPrefs, repeat: RepeatClock = RepeatClock.NONE, private val save: (ControlPrefs) -> Unit) {
+class ControlHolder(
+    val init: ControlInit?,
+    prefs: ControlPrefs,
+    repeat: RepeatClock = RepeatClock.NONE,
+    overlayConfig: OverlayConfig = OverlayPrefs.defaultConfig(),
+    overlayEnabled: Boolean = false,
+    private val saveOverlay: (OverlayConfig) -> Unit = {},
+    private val saveOverlayEnabled: (Boolean) -> Unit = {},
+    private val save: (ControlPrefs) -> Unit,
+) {
     var prefs by mutableStateOf(prefs); private set
     var session by mutableStateOf<ControlSession?>(null)
+    var overlayEnabled by mutableStateOf(overlayEnabled); private set
+    var overlayEdit by mutableStateOf(false)
+    var overlayConfig by mutableStateOf(overlayConfig)
+        private set
+
+    fun enableOverlay(enabled: Boolean) {
+        this.overlayEnabled = enabled
+        saveOverlayEnabled(enabled)
+        if (enabled) closeKeyboard(byUser = true) else overlayEdit = false
+    }
+
+    fun updateOverlay(transform: (OverlayConfig) -> OverlayConfig) {
+        val next = transform(overlayConfig)
+        overlayConfig = next
+        saveOverlay(next)
+    }
     /**
      * The system keyboard's hidden field starts afresh ([RemoteInputView.restartField]; set by the page
      * while the field exists): it mirrors the text in front of the focus computer's caret, so whatever
@@ -343,8 +368,18 @@ fun rememberControlHolder(init: UiInit): ControlHolder {
             val kind = s?.keyboard ?: KeyboardKind.SYSTEM
             ControlPrefs(keyboard = kind, keyboardLand = s?.keyboard ?: KeyboardKind.EMULATED, expanded = s?.expanded == true)
         } else ControlPrefs.load(context)
+        val overlayCfg = if (scene) OverlayPrefs.defaultConfig() else OverlayPrefs.load(context)
+        val overlayOn = if (scene) false else OverlayPrefs.loadEnabled(context)
         // Design scenes hold keys down without end: no repeat timers there.
-        ControlHolder(init.control, prefs, if (scene) RepeatClock.NONE else RepeatClock.main()) { if (!scene) ControlPrefs.save(context, it) }
+        ControlHolder(
+            init.control,
+            prefs,
+            if (scene) RepeatClock.NONE else RepeatClock.main(),
+            overlayConfig = overlayCfg,
+            overlayEnabled = overlayOn,
+            saveOverlay = { if (!scene) OverlayPrefs.save(context, it) },
+            saveOverlayEnabled = { if (!scene) OverlayPrefs.saveEnabled(context, it) },
+        ) { if (!scene) ControlPrefs.save(context, it) }
     }
 }
 
@@ -393,6 +428,7 @@ fun ControlPage(holder: ControlHolder, model: AppModel, actions: AppActions, act
         holder.session = session
         onPauseOrDispose {
             // A pressed (or locked) left button and held keys go up before the session closes.
+            holder.overlayEdit = false
             holder.pad.releaseAll(android.os.SystemClock.uptimeMillis())
             holder.closeKeyboard(byUser = false)
             holder.menu = null
@@ -449,10 +485,22 @@ fun ControlPage(holder: ControlHolder, model: AppModel, actions: AppActions, act
             // keyboard the overlay chooses two rows or a left pad / right controls from remaining height.
             val systemUp = holder.keyboardOpen && holder.keyboard.shown == KeyboardKind.SYSTEM
             val safe = WindowInsets.systemBars.union(WindowInsets.displayCutout)
-            if (!systemUp) Touchpad(holder, cc, Modifier.outset(safe.getLeft(density, direction), safe.getTop(density), safe.getRight(density, direction), safe.getBottom(density))
-                .onGloballyPositioned { padOrigin = it.positionInRoot() }, flat = true, bottomInset = with(density) { safe.getBottom(density).toDp() }) {
-                Box(Modifier.fillMaxSize().padding(safe.asPaddingValues())) {
-                    LandscapeBar(holder, model, state, headerTabs)
+            val padModifier = Modifier.outset(safe.getLeft(density, direction), safe.getTop(density), safe.getRight(density, direction), safe.getBottom(density))
+                .onGloballyPositioned { padOrigin = it.positionInRoot() }
+            val padBottom = with(density) { safe.getBottom(density).toDp() }
+            if (!systemUp) {
+                if (!holder.overlayEnabled) {
+                    Touchpad(holder, cc, padModifier, flat = true, bottomInset = padBottom) {
+                        Box(Modifier.fillMaxSize().padding(safe.asPaddingValues())) {
+                            LandscapeBar(holder, model, state, headerTabs)
+                        }
+                    }
+                } else {
+                    Touchpad(holder, cc, padModifier, flat = true, bottomInset = padBottom)
+                    ControlOverlayLayer(holder, Modifier.fillMaxSize().padding(safe.asPaddingValues()))
+                    Box(Modifier.fillMaxSize().padding(safe.asPaddingValues())) {
+                        LandscapeBar(holder, model, state, headerTabs)
+                    }
                 }
             }
             else LandscapeBar(holder, model, state, headerTabs)
@@ -465,8 +513,11 @@ fun ControlPage(holder: ControlHolder, model: AppModel, actions: AppActions, act
             val rest = if (layout == ControlLayout.PORTRAIT) 92.dp else 16.dp
             val bottom = if (kbTop == null) rest else with(density) { max(rest.toPx(), pageBottom - kbTop + 12.dp.toPx()).toDp() }
             Box(Modifier.weight(1f).fillMaxWidth().onGloballyPositioned { pageBottom = it.positionInRoot().y + it.size.height }) {
-                Touchpad(holder, cc, Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = bottom)
-                    .onGloballyPositioned { padOrigin = it.positionInRoot() })
+                val portraitMod = Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = bottom)
+                Touchpad(holder, cc, portraitMod.onGloballyPositioned { padOrigin = it.positionInRoot() })
+                if (holder.overlayEnabled) {
+                    ControlOverlayLayer(holder, portraitMod)
+                }
             }
         }
         // The glow reaches past the pad's edge, so it is drawn on the page.
@@ -526,7 +577,7 @@ private fun BackHandlerFor(holder: ControlHolder) {
     // Before the IME appears, the dispatcher can close the pending keyboard request.
     val imeOwnsBack = holder.keyboardOpen && holder.keyboard.shown == KeyboardKind.SYSTEM && imeVisible
     val restore = !holder.keyboardOpen && !imeVisible && holder.layout == ControlLayout.LANDSCAPE && holder.fullscreen.enteredByButton
-    androidx.activity.compose.BackHandler(enabled = holder.active && !imeOwnsBack && (holder.keyboardOpen || restore)) {
+    androidx.activity.compose.BackHandler(enabled = holder.active && !imeOwnsBack && !holder.overlayEdit && (holder.keyboardOpen || restore)) {
         if (holder.keyboardOpen) holder.closeKeyboard()
         else holder.fullscreen.restore(holder.upright)
     }
@@ -589,10 +640,11 @@ private fun ControlHeader(holder: ControlHolder, model: AppModel, state: Control
             }
         } else {
             val kbShown = holder.keyboardOpen
+            val kbDesc = com.hachiwii.oink.L10n.translate(if (kbShown) "收起键盘" else "弹出键盘", com.hachiwii.oink.LocalAppLang.current)
             Box(Modifier.align(Alignment.CenterEnd).size(48.dp).clip(RoundedCornerShape(16.dp))
                 .background(if (kbShown) c.accentSoft2 else Color.Transparent)
                 .press { haptic(false); holder.toggleKeyboard() }
-                .semantics { contentDescription = if (kbShown) "收起键盘" else "弹出键盘"; selected = kbShown },
+                .semantics { contentDescription = kbDesc; selected = kbShown },
                 contentAlignment = Alignment.Center) {
                 SvgIcon(DesignIconData.pcKeyboard, 24.dp, tint = if (kbShown) c.accentInk else c.ink, stroke = 1.4f)
             }
@@ -683,9 +735,10 @@ private fun BarButton(modifier: Modifier, label: String, selected: Boolean = fal
     val c = Oink.colors
     val live = LocalBarLive.current
     val ink = if (selected) c.accentInk else c.ink
+    val desc = com.hachiwii.oink.L10n.translate(label, com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.size(48.dp).headerSurface(c, 24.dp, if (selected) c.accentSoft2 else c.tabbar).clip(CircleShape)
         .then(if (live) Modifier.press(pressedColor = c.press) { onClick() } else Modifier)
-        .semantics { contentDescription = label; if (selected) this.selected = true }, contentAlignment = Alignment.Center) {
+        .semantics { contentDescription = desc; if (selected) this.selected = true }, contentAlignment = Alignment.Center) {
         when (label) {
             "调节" -> Lucide(ControlIcons.sliders, 23.dp, ink)
             "恢复" -> Lucide(ControlIcons.minimize, 22.dp, ink)
@@ -721,10 +774,12 @@ private fun FocusCapsule(focus: ControlTarget?, land: Boolean, modifier: Modifie
     val c = Oink.colors
     val h = if (land) 48.dp else 40.dp
     val shape = RoundedCornerShape(h / 2)
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val focusDesc = focus?.let { com.hachiwii.oink.L10n.translate("焦点设备：", lang) + it.name } ?: com.hachiwii.oink.L10n.translate("选择设备", lang)
     Row(modifier.height(h).then(if (land) Modifier.headerSurface(c, h / 2) else Modifier.clip(shape).background(c.chip))
         .clip(shape).then(if (LocalBarLive.current) Modifier.press(pressedColor = c.press) { onClick() } else Modifier)
         .padding(start = if (focus != null) (if (land) 16.5.dp else 12.5.dp) else (if (land) 18.dp else 14.dp), end = if (land) 16.dp else 12.dp)
-        .semantics { contentDescription = focus?.let { "焦点设备：${it.name}" } ?: "选择设备" },
+        .semantics { contentDescription = focusDesc },
         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         // The name rises and fades in when the focus moves (200 ms).
         val rise = with(LocalDensity.current) { 6.dp.roundToPx() }
@@ -736,7 +791,8 @@ private fun FocusCapsule(focus: ControlTarget?, land: Boolean, modifier: Modifie
                 if (f != null) Box(Modifier.horizontalMargin((-2).dp).size(26.dp), contentAlignment = Alignment.Center) {
                     PlatformIcon(f.platform, Modifier.wrapContentSize(unbounded = true), scale = .62f)
                 }
-                T(f?.name ?: "选择设备", 15f, c.ink, weight = 600, lineHeight = 20f, ellipsis = true)
+                if (f != null) T(f.name, 15f, c.ink, weight = 600, lineHeight = 20f, ellipsis = true, raw = true)
+                else T("选择设备", 15f, c.ink, weight = 600, lineHeight = 20f, ellipsis = true)
             }
         }
         Lucide(ControlIcons.chevronDown, 16.dp, c.muted)
@@ -765,6 +821,9 @@ private fun LockButton(holder: ControlHolder, state: ControlState, land: Boolean
     val bg by androidx.compose.animation.animateColorAsState(if (on) c.accentSoft2 else if (land) c.tabbar else c.chip, tween(200), label = "lockBg")
     val ink by androidx.compose.animation.animateColorAsState(if (on) c.accentInk else c.text2, tween(200), label = "lockInk")
     val live = LocalBarLive.current
+    val lockLang = com.hachiwii.oink.LocalAppLang.current
+    val lockDesc = com.hachiwii.oink.L10n.translate("$label，点按${when (look) { LockLook.UNLOCKED -> "锁定"; LockLook.LOCKED -> "解锁"; else -> "关闭游戏模式" }}，长按更多", lockLang)
+    val moreLabel = com.hachiwii.oink.L10n.translate("更多", lockLang)
     Box(Modifier.size(if (land) 48.dp else 40.dp).then(if (land) Modifier.headerSurface(c, 24.dp, bg) else Modifier.background(bg, CircleShape))
         .then(if (!live) Modifier else Modifier.pointerInput(look) {
             awaitEachGesture {
@@ -785,14 +844,14 @@ private fun LockButton(holder: ControlHolder, state: ControlState, land: Boolean
             }
         })
         .semantics {
-            contentDescription = "$label，点按${when (look) { LockLook.UNLOCKED -> "锁定"; LockLook.LOCKED -> "解锁"; else -> "关闭游戏模式" }}，长按更多"
+            contentDescription = lockDesc
             role = Role.Button
             onClick {
                 haptic(false)
                 holder.session?.let { s -> when (look) { LockLook.UNLOCKED -> s.lock(true); LockLook.LOCKED -> s.lock(false); else -> { s.game(ControlGameMode.OFF); s.lock(false) } } }
                 true
             }
-            onLongClick("更多") { haptic(true); holder.menu = "lock"; true }
+            onLongClick(moreLabel) { haptic(true); holder.menu = "lock"; true }
         }, contentAlignment = Alignment.Center) {
         when (look) {
             LockLook.UNLOCKED -> SvgIcon(DesignIconData.actionUnlock, 21.dp, tint = ink, stroke = 1.8f)
@@ -843,7 +902,7 @@ private fun Modifier.menuCard(originX: Float, size: Modifier): Modifier {
 /** One menu row: optional leading icon, the label, a value at the end (accent in 调节), a check when chosen. */
 @Composable
 private fun MenuItem(label: String, value: String? = null, height: Dp = 48.dp, accentValue: Boolean = false, checked: Boolean? = null,
-                     leading: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
+                     rawValue: Boolean = false, leading: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
     val c = Oink.colors
     val haptic = rememberHaptics()
     Row(Modifier.fillMaxWidth().heightIn(min = height).press(pressedColor = c.press, role = if (checked != null) Role.RadioButton else Role.Button) { haptic(false); onClick() }
@@ -855,7 +914,7 @@ private fun MenuItem(label: String, value: String? = null, height: Dp = 48.dp, a
         else {
             T(label, 15f, c.ink, lineHeight = 21f, maxLines = 1)
             T(value, 14f, if (accentValue) c.accentInk else c.muted, Modifier.weight(1f), weight = if (accentValue) 500 else 400,
-                lineHeight = 20f, ellipsis = true, align = TextAlign.End)
+                lineHeight = 20f, ellipsis = true, align = TextAlign.End, raw = rawValue)
         }
         if (checked == true) Lucide(ControlIcons.check, 18.dp, c.accentInk, 2.4f)
     }
@@ -931,14 +990,23 @@ private fun AdjustMenu(holder: ControlHolder, menu: String, top: Dp, land: Boole
             MenuItem(o.name, ControlPrefs.label(o.options, o.current), 56.dp, accentValue = true) { holder.menu = o.key }
         }
     }
+    @Composable fun overlayRows() {
+        SwitchMenuRow("按键映射", holder.overlayEnabled) { holder.enableOverlay(it) }
+        MenuItem("编辑按键", holder.overlayConfig.activeProfile.name, 56.dp, accentValue = true, rawValue = true) {
+            holder.enableOverlay(true)
+            holder.overlayEdit = true
+            holder.menu = null
+        }
+    }
     TwoCardMenu(top, centered = false, open = open?.key, rows = rows, back = { holder.menu = if (holder.menu != "adjust") "adjust" else null }, over = land, first = {
         if (land) Row(Modifier.height(IntrinsicSize.Min)) {
             Column(Modifier.width(250.dp)) { speedAndSwitches() }
             Box(Modifier.fillMaxHeight().width(1.dp).background(c.line))
-            Column(Modifier.width(250.dp)) { choices() }
+            Column(Modifier.width(250.dp)) { choices(); overlayRows() }
         } else {
             speedAndSwitches()
             choices()
+            overlayRows()
         }
     }) {
         val list = open?.options.orEmpty()
@@ -1012,9 +1080,10 @@ private fun SpeedRow(value: Int, onChange: (Int) -> Unit) {
     var trackW by remember { mutableStateOf(1f) }
     val current by rememberUpdatedState(value)
     val change by rememberUpdatedState(onChange)
+    val speedDesc = com.hachiwii.oink.L10n.translate("指针速度", com.hachiwii.oink.LocalAppLang.current)
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 10.dp)
         .semantics(mergeDescendants = true) {
-            contentDescription = "指针速度"
+            contentDescription = speedDesc
             progressBarRangeInfo = ProgressBarRangeInfo(value.toFloat(), 1f..10f, 8)
             setProgress { v -> onChange(v.roundToInt().coerceIn(1, 10)); true }
         }) {
@@ -1076,7 +1145,7 @@ private fun FocusMenu(holder: ControlHolder, model: AppModel, state: ControlStat
                 horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 PlatformIcon(t.platform, Modifier.size(24.dp, 26.dp).wrapContentSize(unbounded = true), scale = .62f)
                 Column(Modifier.weight(1f)) {
-                    T(t.name, 15f, c.ink, lineHeight = 21f, ellipsis = true)
+                    T(t.name, 15f, c.ink, lineHeight = 21f, ellipsis = true, raw = true)
                     if (latency != null) T("${latency.toInt()} ms", 13f, c.muted, lineHeight = 18f)
                 }
                 if (t.device == focus) Lucide(ControlIcons.check, 18.dp, c.accentInk, 2.4f)
@@ -1205,6 +1274,9 @@ private fun Touchpad(holder: ControlHolder, cc: ControlColors, modifier: Modifie
     }
     // Design scenes: put the finger / edge-lock demo in place once the pad has its size.
     val scene = holder.init
+    val padLang = com.hachiwii.oink.LocalAppLang.current
+    val padDesc = com.hachiwii.oink.L10n.translate("触摸板", padLang)
+    val lockedDesc = com.hachiwii.oink.L10n.translate("手指已锁定", padLang)
     Box(modifier.then(if (flat) Modifier else Modifier.boxShadow(cc.padDrop, 1.dp, 3.dp, 32.dp))
         .onGloballyPositioned { padCoords[0] = it; with(density) { pad.width = it.size.width.toDp().value; pad.height = it.size.height.toDp().value } }
         .pointerInput(pad) {
@@ -1266,7 +1338,7 @@ private fun Touchpad(holder: ControlHolder, cc: ControlColors, modifier: Modifie
               } catch (e: kotlinx.coroutines.CancellationException) { pad.cancel(android.os.SystemClock.uptimeMillis()); throw e }
             }
         }
-        .semantics { contentDescription = "触摸板" }) {
+        .semantics { contentDescription = padDesc }) {
         // Keep the animated texture in a separate draw node from the floating toolbar. A glow
         // invalidation must redraw the pad, without replacing its sibling toolbar's cached layer.
         Box(Modifier.matchParentSize().drawBehind { drawPad(cc, grain, glow, glowAt, density.density, if (flat) 0f else 32f) })
@@ -1280,7 +1352,7 @@ private fun Touchpad(holder: ControlHolder, cc: ControlColors, modifier: Modifie
         pad.edge?.let { e -> EdgeBadge(e) }
         if (pad.locked != null) {
             // Screen readers hear 手指已锁定 when the lock starts.
-            Box(Modifier.size(1.dp).semantics { liveRegion = LiveRegionMode.Polite; contentDescription = "手指已锁定" })
+            Box(Modifier.size(1.dp).semantics { liveRegion = LiveRegionMode.Polite; contentDescription = lockedDesc })
             ReleaseCapsule(Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp + bottomInset)) { pad.releaseLock() }
         }
         if (scene?.edgeDemo != null || scene?.touch != null) EdgeDemo(holder, scene)
@@ -1346,7 +1418,7 @@ private fun ClickRipple(r: Ripple) {
     val b = remember { Animatable(0f) }
     LaunchedEffect(Unit) { a.animateTo(1f, tween(500, easing = EaseOutExpo)) }
     LaunchedEffect(Unit) { if (r.kind == RippleKind.DOUBLE) { delay(120); b.animateTo(1f, tween(500, easing = EaseOutExpo)) } }
-    val label = when (r.kind) { RippleKind.CLICK -> "单击"; RippleKind.DOUBLE -> "双击"; RippleKind.RIGHT -> "右键" }
+    val label = com.hachiwii.oink.L10n.translate(when (r.kind) { RippleKind.CLICK -> "单击"; RippleKind.DOUBLE -> "双击"; RippleKind.RIGHT -> "右键" }, com.hachiwii.oink.LocalAppLang.current)
     Canvas(Modifier.fillMaxSize().semantics { liveRegion = LiveRegionMode.Polite; contentDescription = label }) {
         fun ring(t: Float) {
             if (t <= 0f || t >= 1f) return
@@ -1406,10 +1478,11 @@ private fun ReleaseCapsule(modifier: Modifier, onClick: () -> Unit) {
     val haptic = rememberHaptics()
     val shown = remember { Animatable(0f) }
     LaunchedEffect(Unit) { shown.animateTo(1f, tween(200, easing = androidx.compose.animation.core.FastOutSlowInEasing)) }
+    val relDesc = com.hachiwii.oink.L10n.translate("释放：抬起锁定的手指", com.hachiwii.oink.LocalAppLang.current)
     Row(modifier.graphicsLayer { alpha = shown.value; translationY = (1f - shown.value) * 8.dp.toPx() }
         .boxShadow(c.shadow, 4.dp, 14.dp, 20.dp).height(40.dp).clip(RoundedCornerShape(20.dp)).background(c.elev)
         .border(.5.dp, c.border, RoundedCornerShape(20.dp)).press { haptic(false); onClick() }
-        .padding(start = 12.dp, end = 16.dp).semantics(mergeDescendants = true) { contentDescription = "释放：抬起锁定的手指" },
+        .padding(start = 12.dp, end = 16.dp).semantics(mergeDescendants = true) { contentDescription = relDesc },
         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         SvgIcon(DesignIconData.actionUnlock, 18.dp, tint = c.accentInk, stroke = 1.8f)
         T("释放", 15f, c.accentInk, weight = 600, lineHeight = 20f)
@@ -1755,6 +1828,10 @@ private fun BoxScope.FloatingKeyboard(holder: ControlHolder, cc: ControlColors, 
         // The handle stays mounted through movement and the expansion animation.
         if (!expanded) CompositionLocalProvider(LocalDensity provides keyboardDensity) {
             val at = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
+            val dragLang = com.hachiwii.oink.LocalAppLang.current
+            val dragDesc = com.hachiwii.oink.L10n.translate("拖动键盘", dragLang)
+            val dragStateDesc = com.hachiwii.oink.L10n.translate(if (handlePressed) "已按下" else "未按下", dragLang)
+            val expandLabel = com.hachiwii.oink.L10n.translate("展开全屏键盘", dragLang)
             Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(22.dp)
                 .onGloballyPositioned { at[0] = it }
                 .pointerInput(Unit) {
@@ -1812,9 +1889,9 @@ private fun BoxScope.FloatingKeyboard(holder: ControlHolder, cc: ControlColors, 
                     }
                 }
                 .semantics {
-                    contentDescription = "拖动键盘"
-                    stateDescription = if (handlePressed) "已按下" else "未按下"
-                    onClick(label = "展开全屏键盘") { expand(); true }
+                    contentDescription = dragDesc
+                    stateDescription = dragStateDesc
+                    onClick(label = expandLabel) { expand(); true }
                 }) {
                 Box(Modifier.align(Alignment.Center).size(40.dp, 5.dp).clip(RoundedCornerShape(3.dp)).background(if (handlePressed) c.handle.copy(red = c.handle.red * .7f, green = c.handle.green * .7f, blue = c.handle.blue * .7f) else c.handle))
             }
@@ -2045,6 +2122,9 @@ private fun Key(cc: ControlColors, act: KeyAct, label: String, modifier: Modifie
     val shape = RoundedCornerShape(radius)
     val current by rememberUpdatedState(act)
     val token = remember { Any() }
+    val kLang = com.hachiwii.oink.LocalAppLang.current
+    val kDesc = com.hachiwii.oink.L10n.translate(label, kLang) + com.hachiwii.oink.L10n.translate(when (latch) { Latch.HELD -> "（按住）"; Latch.LOCKED -> "（锁定）"; null -> "" }, kLang)
+    val kLongLabel = com.hachiwii.oink.L10n.translate(longLabel ?: if (latch == Latch.LOCKED) "解锁" else "锁定", kLang)
     if (board != null) DisposableEffect(board, token) { onDispose { board.keySpots.remove(token) } }
     Box(modifier.alpha(if (enabled) 1f else .4f).clip(shape).background(bg)
         .then(if (latch == Latch.HELD) Modifier.border(1.5.dp, c.accent, shape) else Modifier)
@@ -2091,7 +2171,7 @@ private fun Key(cc: ControlColors, act: KeyAct, label: String, modifier: Modifie
             }
         })
         .semantics {
-            contentDescription = label + when (latch) { Latch.HELD -> "（按住）"; Latch.LOCKED -> "（锁定）"; null -> "" }
+            contentDescription = kDesc
             role = if (toggled != null) Role.Switch else Role.Button
             if (toggled != null) toggleableState = androidx.compose.ui.state.ToggleableState(toggled)
             if (latch != null) selected = true
@@ -2101,7 +2181,7 @@ private fun Key(cc: ControlColors, act: KeyAct, label: String, modifier: Modifie
                 when (val a = current) { is OnRelease -> a.run(); is Hold -> try { a.down() } finally { a.up() } }
                 true
             }
-            if (enabled) (act as? OnRelease)?.long?.let { long -> onLongClick(longLabel ?: if (latch == Latch.LOCKED) "解锁" else "锁定") { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); long(); true } }
+            if (enabled) (act as? OnRelease)?.long?.let { long -> onLongClick(kLongLabel) { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); long(); true } }
         }, contentAlignment = Alignment.Center) {
         content(ink)
         if (latch == Latch.LOCKED) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp).size(12.dp, 2.dp).clip(RoundedCornerShape(1.dp)).background(ink))

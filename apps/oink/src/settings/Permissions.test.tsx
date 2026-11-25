@@ -213,24 +213,35 @@ describe('applicable independent permission rows', () => {
     expect(onAbout).toHaveBeenCalledOnce();
   });
 
-  it.each(['en', 'zh-Hans'] as const)('opens the crash report privacy notice without changing consent in %s', async language => {
+  it.each(['en', 'zh-Hans'] as const)('omits stripped telemetry, updater, and auto-unlock rows in %s', language => {
     setLanguage(language);
-    const open = vi.spyOn(shell, 'openUrl').mockResolvedValue();
-    const set = vi.spyOn(prefs, 'set');
-    const { container, rerender } = render(view());
-    for (const editable of [true, false]) {
-      const canEdit = vi.spyOn(prefs, 'canEdit').mockReturnValue(editable);
-      rerender(view());
-      const row = container.querySelector('[data-item="crashReports"]')!;
-      const link = within(row as HTMLElement).getByRole('link', { name: language === 'en' ? 'Privacy policy' : '隐私政策' });
-      expect(link.getAttribute('href')).toBe('https://github.com/oinkvm/oink/blob/main/PRIVACY.md');
-      fireEvent.click(link);
-      await waitFor(() => expect(open).toHaveBeenCalledWith('https://github.com/oinkvm/oink/blob/main/PRIVACY.md'));
-      expect(set).not.toHaveBeenCalled();
-      canEdit.mockRestore();
+    const { container } = render(view(initial, '', vi.fn(), undefined, 'win'));
+    for (const id of ['crashReports', 'updates', 'updateChannel', 'autoUnlock', 'syncUnlock']) {
+      expect(container.querySelector(`[data-item="${id}"]`)).toBeNull();
     }
-    open.mockRestore();
-    set.mockRestore();
+  });
+  it.each(['en', 'ja', 'ko', 'zh-Hans'])('exposes corner dead zone, hold-Ctrl warp, and independent mouse settings on Windows in %s', language => {
+    setLanguage(language);
+    const set = vi.fn();
+    const { container, unmount } = render(view(initial, '', vi.fn(), undefined, 'win', { ...prefs, set }));
+    for (const id of ['cornerDeadZoneEnabled', 'requireCtrlToWarp', 'independentMouse']) {
+      const row = container.querySelector<HTMLElement>(`[data-item="${id}"]`)!;
+      expect(row).not.toBeNull();
+      const sw = within(row).getByRole('switch') as HTMLInputElement;
+      expect(sw.checked).toBe(false);
+      fireEvent.click(sw);
+      expect(set).toHaveBeenCalledWith(id, true);
+    }
+    const dzSizeRow = container.querySelector<HTMLElement>('[data-item="cornerDeadZonePx"]')!;
+    expect(dzSizeRow).not.toBeNull();
+    expect(dzSizeRow.dataset.parent).toBe('cornerDeadZoneEnabled');
+    const dzInput = within(dzSizeRow).getByRole('textbox') as HTMLInputElement;
+    expect(dzInput.value).toBe('50');
+    expect(dzInput.disabled).toBe(true);
+    unmount();
+    const mac = render(view());
+    expect(mac.container.querySelector('[data-item="cornerDeadZoneEnabled"]')).toBeNull();
+    expect(mac.container.querySelector('[data-item="independentMouse"]')).toBeNull();
   });
   it.each([['mac','en'],['mac','zh-Hans'],['win','en'],['win','zh-Hans']] as const)('has no projection preference or search row on %s in %s', (platform,language) => {
     setLanguage(language);
@@ -299,15 +310,12 @@ describe('applicable independent permission rows', () => {
 
 
 describe('settings actions', () => {
-  it.each(['en','zh-Hans'] as const)('opens Releases in %s', async language => {
+  it.each(['en','zh-Hans'] as const)('omits Releases external link on version row and retains logMaxMb MB suffix in %s', language => {
     setLanguage(language);
-    const open = vi.spyOn(shell, 'openUrl').mockResolvedValue();
     const { container } = render(view());
-    fireEvent.click(container.querySelector('[data-item="version"] button')!);
-    await waitFor(() => expect(open).toHaveBeenCalledWith('https://github.com/oinkvm/oink/releases'));
+    expect(container.querySelector('[data-item="version"] button')).toBeNull();
     const input = container.querySelector('[data-item="logMaxMb"] input')!;
     expect(input.closest('.ok-input')?.textContent).toContain('MB');
-    open.mockRestore();
   });
   it.each(['en','zh-Hans'] as const)('opens the diagnostics folder and saves each offered range in %s', async language => {
     setLanguage(language);

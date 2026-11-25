@@ -58,7 +58,7 @@ export interface PauseStatus {
   author: DeviceKey | null;
   author_name: string | null;
   emergency: boolean;
-  reason: "none" | "local_user" | "remote_user" | "emergency" | "input_backlog" | "unknown";
+  reason: "none" | "local_user" | "remote_user" | "emergency" | "input_backlog" | "remote_desktop" | "unknown";
   capture_detached: boolean;
   settling: boolean;
 }
@@ -205,6 +205,14 @@ export interface InputSettings {
   take_foreground_on_leave: boolean;
   /** Windows device-local Quicker compatibility mode (remote mouse buttons injected untagged). */
   quicker_compat?: boolean;
+  /** Windows device-local corner dead zone toggle. */
+  corner_dead_zone_enabled?: boolean;
+  /** Windows device-local corner dead zone radius in pixels. */
+  corner_dead_zone_px?: number;
+  /** Windows device-local require holding Ctrl to warp across screen edges. */
+  require_ctrl_to_warp?: boolean;
+  /** Windows device-local independent cursor mode for Moonlight/remote desktop compatibility. */
+  independent_mouse?: boolean;
   /** Device-local: unlock group devices with automatic unlock when this one is unlocked. */
   sync_unlock_others?: boolean;
   emergency_hold_ms: number;

@@ -78,6 +78,10 @@ export interface Prefs {
     forwardInjectedInput: boolean;
     takeForegroundOnLeave: boolean;
     quickerCompat: boolean;
+    cornerDeadZoneEnabled: boolean;
+    cornerDeadZonePx: string;
+    requireCtrlToWarp: boolean;
+    independentMouse: boolean;
     syncUnlock: boolean;
     pointerTrail: boolean;
     clipReceive: boolean;
@@ -119,6 +123,10 @@ export const DEFAULT_PREFS: Prefs = {
     forwardInjectedInput: true,
     takeForegroundOnLeave: false,
     quickerCompat: false,
+    cornerDeadZoneEnabled: false,
+    cornerDeadZonePx: '50',
+    requireCtrlToWarp: false,
+    independentMouse: false,
     syncUnlock: false,
     pointerTrail: true,
     clipReceive: true,

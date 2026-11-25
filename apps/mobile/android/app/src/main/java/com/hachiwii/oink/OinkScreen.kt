@@ -100,6 +100,7 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
         audioAvailable = state.audioSettings != null,
         persistentNotice = state.persistentNotification,
     )
+    LaunchedEffect(shownPrefs.language) { L10n.setPreference(shownPrefs.language) }
     // A phone-to-phone notification opens the transfer page at its message.
     val focus = (context as? MainActivity)?.focusMessage
     // The persistent notification (「打开 App」) or a tile asked for a page.
@@ -119,7 +120,7 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
             settings.themeColor = next.accent.id; settings.themeMode = next.scheme
             onAppearanceChanged(next.scheme, next.accent.id)
         }
-        if (next.language != old.language) settings.language = next.language
+        if (next.language != old.language) { settings.language = next.language; L10n.setPreference(next.language) }
         if (next.homeTab != old.homeTab) settings.homeTab = HomeTab.entries[next.homeTab.ordinal]
         if (next.autoWriteClipboard != old.autoWriteClipboard) repository.setAutomatic(next.autoWriteClipboard)
         if (next.autoReadClipboard != old.autoReadClipboard) {
@@ -130,6 +131,7 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
         if (next.micAutoOff != old.micAutoOff) repository.setAudioIdleTimeout(uniffi.oink_mobile_ffi.MobileMediaKind.MICROPHONE, AudioTimeout.fromMinutes(next.micAutoOff))
         if (next.speakerAutoOff != old.speakerAutoOff) repository.setAudioIdleTimeout(uniffi.oink_mobile_ffi.MobileMediaKind.SPEAKER, AudioTimeout.fromMinutes(next.speakerAutoOff))
         if (next.echoCancel != old.echoCancel) repository.setEchoCancellation(next.echoCancel)
+        if (next.lowLatencyAudio != old.lowLatencyAudio) repository.setLowLatencyAudio(next.lowLatencyAudio)
         if (next.persistentNotice != old.persistentNotice) repository.setPersistentNotification(next.persistentNotice)
         if (next.noticeTap != old.noticeTap) repository.setNoticeTap(if (next.noticeTap == "open") NoticeTap.OPEN else NoticeTap.COPY)
         if (next.noticeTab != old.noticeTab) repository.setNoticeTab(HomeTab.entries[next.noticeTab.ordinal])
@@ -453,6 +455,7 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
         setDeviceName = { repository.setLocalDeviceName(it) },
         retryConnection = { repository.retryConnection() },
         control = controlOpener,
+        quitApp = { repository.quitApp() },
     )
     if (share && shareId == null) {
         // System share entry, first step: pick the device (native-rewrite.md 「分享 / 打开方式先选设备」).
@@ -474,7 +477,7 @@ fun OinkScreen(repository: OinkRepository, share: Boolean, scene: DesignScene?,
             when (phase) {
                 SharePhase.SUCCEEDED -> { delay(800); activity?.finish() }
                 SharePhase.FAILED -> {
-                    android.widget.Toast.makeText(context, shareState?.status ?: "分享已中断，请重新分享", android.widget.Toast.LENGTH_LONG).show()
+                    android.widget.Toast.makeText(context, L10n.translate(shareState?.status ?: "分享已中断，请重新分享"), android.widget.Toast.LENGTH_LONG).show()
                     activity?.finish()
                 }
                 else -> {}
@@ -498,7 +501,7 @@ private fun groupKey(g: OpenFileGroup) = when (g) {
 private fun loadPrefs(s: LocalSettings) = Prefs(
     accent = Accent.of(s.themeColor), scheme = s.themeMode, language = s.language, homeTab = Tab.entries[s.homeTab.ordinal],
     autoWriteClipboard = s.autoWriteClipboard, autoReadClipboard = s.autoReadClipboard,
-    speakerTap = s.speakerTap,
+    speakerTap = s.speakerTap, lowLatencyAudio = s.lowLatencyAudio,
     persistentNotice = s.persistentNotification, hideRecents = s.hideInRecents, openWith = s.openFiles,
     noticeTap = if (s.noticeTap == NoticeTap.OPEN) "open" else "copy", noticeTab = Tab.entries[s.noticeTab.ordinal],
     openWithGroups = OpenFileGroup.entries.associate { groupKey(it) to s.selected(it) }, autoRecover = s.autoRecover,
@@ -874,7 +877,10 @@ internal fun uniffi.oink_mobile_ffi.TransferTargetsView.toUi(devices: Map<String
 @androidx.compose.runtime.Composable
 private fun ShareTheme(prefs: Prefs, systemDark: Boolean, content: @androidx.compose.runtime.Composable () -> Unit) {
     val dark = when (prefs.scheme) { "dark" -> true; "light" -> false; else -> systemDark }
-    OinkTheme(androidx.compose.runtime.remember(dark, prefs.accent) { OinkColors.of(dark, prefs.accent) }, content)
+    val lang = AppLang.resolve(prefs.language)
+    CompositionLocalProvider(LocalAppLang provides lang) {
+        OinkTheme(androidx.compose.runtime.remember(dark, prefs.accent) { OinkColors.of(dark, prefs.accent) }, content)
+    }
 }
 
 /**
@@ -910,7 +916,7 @@ private fun SharePickerFlow(targets: TransferTargetsUi, connected: Boolean, repo
                 val online = repository.confirmOnline(row.peer.id)
                 connecting = null
                 if (online) onPick(row.peer, false)
-                else { removed = removed + row.peer.id; toast.value = ToastData(appText("${row.peer.name} 不在线", "${row.peer.name} is offline")) }
+                else { removed = removed + row.peer.id; toast.value = ToastData(L10n.translate("${row.peer.name} 不在线")) }
             }
         }, onDismiss = onDismiss)
 }

@@ -298,6 +298,10 @@ impl LinkLayer {
         self.config_phase_applied();
     }
 
+    pub fn flush_commands(&self) {
+        self.config_phase_applied();
+    }
+
     fn config_phase_applied(&self) {
         // C0 is owned by an ordinary configuration thread. Its frame writer is
         // scheduled ahead of ordinary commands, so merely enqueuing a phase

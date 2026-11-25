@@ -55,7 +55,7 @@ class PersistentNoticeTest {
     }
 
     private fun build(tap: NoticeTap, tab: HomeTab = HomeTab.DEVICES, speaker: Boolean = false, microphone: Boolean = false): Notification =
-        PersistentNotices.build(context, PersistentNotice(noticeTitle(tap, false), "1 在线设备", tap, tab, speaker, microphone))
+        PersistentNotices.build(context, PersistentNotice(noticeTitle(tap, false), "1 在线设备", tap, tab, speaker, microphone), AppLang.ZH)
     private fun labels(n: Notification) = n.actions.orEmpty().map { it.title.toString() }
 
     @Test fun theNotificationHasTheOinkIconAndItsLines() {
@@ -67,33 +67,33 @@ class PersistentNoticeTest {
         assertEquals(PersistentNotices.CHANNEL, notice.channelId)
     }
 
-    /** Buttons (user 2026-11-12): the action the tap does not do, then the stop buttons for the roles held; at most three. */
+    /** Buttons (user 2026-11-12 + Quit): primary tap-alternative, at most one active audio stop button, and Quit; capped at three. */
     @Test fun buttonsForEveryTapModeAndAudioRole() {
-        val open = "打开 Oink"; val copy = "复制内容"; val speaker = "停止接收音频"; val mic = "停止共享麦克风"
+        val open = "打开 Oink"; val copy = "复制内容"; val speaker = "停止接收音频"; val mic = "停止共享麦克风"; val quit = "退出"
         val expected = mapOf(
-            Triple(NoticeTap.COPY, false, false) to listOf(open),
-            Triple(NoticeTap.COPY, true, false) to listOf(open, speaker),
-            Triple(NoticeTap.COPY, false, true) to listOf(open, mic),
-            Triple(NoticeTap.COPY, true, true) to listOf(open, speaker, mic),
-            Triple(NoticeTap.OPEN, false, false) to listOf(copy),
-            Triple(NoticeTap.OPEN, true, false) to listOf(copy, speaker),
-            Triple(NoticeTap.OPEN, false, true) to listOf(copy, mic),
-            Triple(NoticeTap.OPEN, true, true) to listOf(copy, speaker, mic),
+            Triple(NoticeTap.COPY, false, false) to listOf(open, quit),
+            Triple(NoticeTap.COPY, true, false) to listOf(open, speaker, quit),
+            Triple(NoticeTap.COPY, false, true) to listOf(open, mic, quit),
+            Triple(NoticeTap.COPY, true, true) to listOf(open, speaker, quit),
+            Triple(NoticeTap.OPEN, false, false) to listOf(copy, quit),
+            Triple(NoticeTap.OPEN, true, false) to listOf(copy, speaker, quit),
+            Triple(NoticeTap.OPEN, false, true) to listOf(copy, mic, quit),
+            Triple(NoticeTap.OPEN, true, true) to listOf(copy, speaker, quit),
         )
         expected.forEach { (case, labels) ->
             val (tap, sp, mi) = case
             assertEquals("$case", labels, noticeActions(tap, sp, mi).map { it.label })
-            assertEquals("$case", labels, labels(build(tap, speaker = sp, microphone = mi)))
+            assertEquals("$case", labels, labels(PersistentNotices.build(context, PersistentNotice(noticeTitle(tap, false), "1 在线设备", tap, HomeTab.DEVICES, sp, mi), AppLang.ZH)))
         }
     }
 
     @Test fun theButtonsFollowTheState() {
         val notice = persistentNotice(state(speaker = true, microphone = true, tap = NoticeTap.OPEN))
-        assertEquals(listOf(NoticeAction.COPY, NoticeAction.STOP_SPEAKER, NoticeAction.STOP_MICROPHONE),
+        assertEquals(listOf(NoticeAction.COPY, NoticeAction.STOP_SPEAKER, NoticeAction.QUIT),
             noticeActions(notice.tap, notice.speaker, notice.microphone))
-        // Speaker turned off: its button goes.
+        // Speaker turned off: microphone stop takes the middle slot while Quit remains.
         val after = persistentNotice(state(speaker = false, microphone = true, tap = NoticeTap.OPEN))
-        assertEquals(listOf(NoticeAction.COPY, NoticeAction.STOP_MICROPHONE), noticeActions(after.tap, after.speaker, after.microphone))
+        assertEquals(listOf(NoticeAction.COPY, NoticeAction.STOP_MICROPHONE, NoticeAction.QUIT), noticeActions(after.tap, after.speaker, after.microphone))
     }
 
     @Test fun openButtonOpensOinkAndCopyButtonCopiesWithoutOpeningIt() {
@@ -107,14 +107,27 @@ class PersistentNoticeTest {
     }
 
     @Test fun stopButtonsCommandTheConnectionService() {
-        val actions = build(NoticeTap.COPY, speaker = true, microphone = true).actions
-        val speaker = shadowOf(actions[1].actionIntent)
-        val mic = shadowOf(actions[2].actionIntent)
-        listOf(speaker to PersistentNotices.STOP_SPEAKER, mic to PersistentNotices.STOP_MICROPHONE).forEach { (pi, action) ->
+        val spActions = PersistentNotices.build(context, PersistentNotice(noticeTitle(NoticeTap.COPY, false), "1 在线设备", NoticeTap.COPY, HomeTab.DEVICES, speaker = true), AppLang.ZH).actions
+        val speaker = shadowOf(spActions[1].actionIntent)
+        val quit = shadowOf(spActions[2].actionIntent)
+        val micActions = PersistentNotices.build(context, PersistentNotice(noticeTitle(NoticeTap.COPY, false), "1 在线设备", NoticeTap.COPY, HomeTab.DEVICES, microphone = true), AppLang.ZH).actions
+        val mic = shadowOf(micActions[1].actionIntent)
+        listOf(speaker to PersistentNotices.STOP_SPEAKER, mic to PersistentNotices.STOP_MICROPHONE, quit to PersistentNotices.QUIT).forEach { (pi, action) ->
             assertTrue(pi.isServiceIntent)
             assertEquals(ComponentName(context, ConnectionService::class.java), pi.savedIntent.component)
             assertEquals(action, pi.savedIntent.action)
         }
+    }
+
+    @Test fun notificationTranslatesToConfiguredLanguages() {
+        val model = persistentNotice(state(speaker = true, microphone = false, tap = NoticeTap.COPY))
+        val en = PersistentNotices.build(context, model, AppLang.EN)
+        assertEquals("Oink · Tap to copy shared clipboard", en.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals(listOf("Open Oink", "Stop audio output", "Quit"), labels(en))
+        assertEquals(listOf("Oink を開く", "音声受信を停止", "終了"),
+            labels(PersistentNotices.build(context, model, AppLang.JA)))
+        assertEquals(listOf("Oink 열기", "오디오 수신 중지", "종료"),
+            labels(PersistentNotices.build(context, model, AppLang.KO)))
     }
 
     @Test fun copyModeTapsTheInvisibleCopyActivity() {

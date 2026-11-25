@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
-import com.hachiwii.oink.ui.appText
 import com.hachiwii.oink.ui.receivedNoticeText
 import com.hachiwii.oink.ui.sendingNoticeText
 import com.hachiwii.oink.ui.sendingNoticeTitle
@@ -24,10 +23,10 @@ object TransferNotices {
     /** Notification ids: hidden shares from here up, by share id; received ones below. */
     private const val SENDING_BASE = 0x10000
 
-    fun createChannels(context: Context) {
+    fun createChannels(context: Context, lang: AppLang = L10n.current) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_RECEIVED, appText("收到的文件", "Received files"), NotificationManager.IMPORTANCE_HIGH))
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_SENDING, appText("发送进度", "Sending progress"), NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_RECEIVED, L10n.translate("收到的文件", lang), NotificationManager.IMPORTANCE_HIGH))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_SENDING, L10n.translate("发送进度", lang), NotificationManager.IMPORTANCE_LOW))
     }
 
     fun receivedId(recordId: Long) = (recordId % SENDING_BASE).toInt()
@@ -39,7 +38,7 @@ object TransferNotices {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val tap = PendingIntent.getActivity(context, receivedId(recordId), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(context, CHANNEL_RECEIVED).setSmallIcon(R.drawable.ic_stat_oink)
-            .setContentTitle(sender).setContentText(receivedNoticeText(count, firstName))
+            .setContentTitle(sender).setContentText(L10n.translate(receivedNoticeText(count, firstName)))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE).setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true).setContentIntent(tap).build()
     }
@@ -51,12 +50,12 @@ object TransferNotices {
     fun sending(context: Context, to: String, summary: String, percent: Int?, cancel: PendingIntent,
                 shareId: Long = 0, recordId: Long? = null): Notification =
         NotificationCompat.Builder(context, CHANNEL_SENDING).setSmallIcon(R.drawable.ic_stat_oink)
-            .setContentTitle(sendingNoticeTitle(to))
-            .setContentText(if (percent == null) summary else sendingNoticeText(summary, percent))
+            .setContentTitle(L10n.translate(sendingNoticeTitle(to)))
+            .setContentText(L10n.translate(if (percent == null) summary else sendingNoticeText(summary, percent)))
             .setProgress(100, percent ?: 0, percent == null)
             .setOngoing(true).setOnlyAlertOnce(true).setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setContentIntent(openTransfer(context, shareId, recordId))
-            .addAction(0, appText("取消", "Cancel"), cancel).build()
+            .addAction(0, L10n.translate("取消"), cancel).build()
 
     /**
      * A hidden share waiting for its offline target (user 2026-11-11): the card's text with 取消 only, no
@@ -64,12 +63,12 @@ object TransferNotices {
      */
     fun waiting(context: Context, shareId: Long, to: String, cancel: PendingIntent): Notification {
         // One paragraph in a notification: the card's line break is for the card's width.
-        val text = ShareStatusText.waitingForTarget().replace("\n", "")
+        val text = L10n.translate(ShareStatusText.waitingForTarget()).replace("\n", " ")
         return NotificationCompat.Builder(context, CHANNEL_SENDING).setSmallIcon(R.drawable.ic_stat_oink)
             .setContentTitle(to).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setOngoing(true).setOnlyAlertOnce(true).setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setContentIntent(openTransfer(context, shareId, null))
-            .addAction(0, appText("取消", "Cancel"), cancel).build()
+            .addAction(0, L10n.translate("取消"), cancel).build()
     }
 
     /** Opens Oink on the transfer page at [recordId] (null: the share has no record yet, its newest message). */

@@ -87,14 +87,16 @@ private fun PickDeviceRow(row: PickRow, first: Boolean, busy: Boolean, enabled: 
     val c = Oink.colors
     val haptic = rememberHaptics()
     val p = row.peer
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val busyDesc = com.hachiwii.oink.L10n.translate("正在连接 ${p.name}", lang)
     Row(Modifier.fillMaxWidth()
         .then(if (first) Modifier else Modifier.drawBehind { drawRect(c.line, Offset(46.dp.toPx(), 0f), Size(size.width - 46.dp.toPx(), 1.dp.toPx())) })
         .heightIn(min = 68.dp).press(enabled = enabled, pressedColor = c.press) { haptic(false); onClick() }
-        .semantics { contentDescription = p.name; if (busy) stateDescription = appText("正在连接 ${p.name}", "Connecting to ${p.name}") }
+        .semantics { contentDescription = p.name; if (busy) stateDescription = busyDesc }
         .padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
         PlatformIcon(p.platform, privileged = p.privileged)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            T(p.name, 17f, c.ink, weight = 650, lineHeight = 22.95f, letterSpacing = -.2f)
+            T(p.name, 17f, c.ink, weight = 650, lineHeight = 22.95f, letterSpacing = -.2f, raw = true)
             if (row.confirmed) Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(c.good))
                 T(appText("在线", "Online"), 13f, c.goodInk, lineHeight = 18.2f)

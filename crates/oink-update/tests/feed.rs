@@ -303,13 +303,12 @@ fn human_version_cannot_decrease_even_when_build_increases() {
 }
 
 #[test]
-fn compiled_feed_origin_has_no_runtime_override_and_test_assets_stay_loopback() {
+fn compiled_feed_origin_is_stripped_in_local_only_builds() {
     #[cfg(not(feature = "test-feed"))]
     {
-        assert_eq!(
-            manifest_url(),
-            "https://updates.oink.hachiwii.com/windows/v1/win-2026-01/stable/manifest.json"
-        );
+        let url = manifest_url();
+        assert!(!url.starts_with("http"));
+        assert_eq!(url, "/windows/v1/win-2026-01/stable/manifest.json");
         assert!(
             validate_package_url("http://127.0.0.1:8765/oink-update-qualification/packages/candidate.msi").is_err()
         );

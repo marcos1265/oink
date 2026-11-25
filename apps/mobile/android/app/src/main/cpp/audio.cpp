@@ -24,6 +24,8 @@ struct Audio {
     uint64_t generation;
     int sampleRate = 48000;
     int channels = 0;
+    aaudio_format_t format = AAUDIO_FORMAT_PCM_FLOAT;
+    float pullScratch[4096 * 2]{};
     int event = -1;
     std::atomic<bool> stopping{false};
     std::atomic<int> error{AAUDIO_OK};
@@ -124,15 +126,20 @@ struct Audio {
     }
     static aaudio_data_callback_result_t data(AAudioStream* stream, void* opaque, void* buffer, int32_t frames) {
         auto* self = static_cast<Audio*>(opaque);
-        auto* samples = static_cast<float*>(buffer);
         if (self->stopping.load(std::memory_order_acquire)) {
-            if (self->output) std::fill_n(samples, frames * self->channels, 0.0f);
+            if (self->output) {
+                if (self->format == AAUDIO_FORMAT_PCM_I16) {
+                    std::fill_n(static_cast<int16_t*>(buffer), frames * self->channels, int16_t{0});
+                } else {
+                    std::fill_n(static_cast<float*>(buffer), frames * self->channels, 0.0f);
+                }
+            }
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
         self->callbacks.fetch_add(1, std::memory_order_relaxed);
         self->framesSeen.fetch_add(frames, std::memory_order_relaxed);
         // Aggregate signal presence and level only; retain no PCM or speech-derived data in diagnostics.
-        if (self->input) self->measure(samples, frames);
+        if (self->input) self->measure(static_cast<const float*>(buffer), frames);
         // A direction has one serialized callback writer.
         self->maxBatch.store(std::max(self->maxBatch.load(std::memory_order_relaxed), frames), std::memory_order_relaxed);
         // AAudio may choose a larger callback. Keep each ABI call within its 4096-frame bound.
@@ -140,11 +147,26 @@ struct Audio {
         self->countStampFrames(frames);
         for (int offset = 0; offset < frames; offset += 4096) {
             auto count = std::min(4096, frames - offset);
-            auto* part = samples + offset * self->channels;
             const uint64_t partHost = host == 0 ? 0 : host +
                 static_cast<uint64_t>(offset) * 1'000'000'000ULL / static_cast<uint64_t>(self->sampleRate);
-            if (self->output) oink_audio_output_pull_at(self->output, part, count, partHost);
+            if (self->output) {
+                if (self->format == AAUDIO_FORMAT_PCM_I16) {
+                    oink_audio_output_pull_at(self->output, self->pullScratch, count, partHost);
+                    auto* dst = static_cast<int16_t*>(buffer) + offset * self->channels;
+                    const int32_t totalSamples = count * self->channels;
+                    for (int32_t i = 0; i < totalSamples; ++i) {
+                        const float raw = self->pullScratch[i];
+                        const float clamped = std::isfinite(raw) ? std::clamp(raw, -1.0f, 1.0f) : 0.0f;
+                        const long scaled = std::lrintf(clamped * 32767.0f);
+                        dst[i] = static_cast<int16_t>(std::clamp(scaled, -32768L, 32767L));
+                    }
+                } else {
+                    auto* part = static_cast<float*>(buffer) + offset * self->channels;
+                    oink_audio_output_pull_at(self->output, part, count, partHost);
+                }
+            }
             if (self->input) {
+                auto* part = static_cast<float*>(buffer) + offset * self->channels;
                 const uint32_t queued = oink_audio_input_push(self->input, part, count, partHost);
                 if (queued > 0) self->signal();
                 // Frames the bounded handoff refused because the worker fell behind
@@ -266,7 +288,7 @@ Audio* audio(jlong handle) { return reinterpret_cast<Audio*>(handle); }
 }
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* value, void*) { vm = value; return JNI_VERSION_1_6; }
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_hachiwii_oink_audio_NativeAudio_open(JNIEnv* env, jobject listener, jboolean input, jlong generation, jboolean exclusive) {
+Java_com_hachiwii_oink_audio_NativeAudio_open(JNIEnv* env, jobject listener, jboolean input, jlong generation, jboolean exclusive, jboolean lowLatency) {
     auto* self = new Audio();
     self->generation = static_cast<uint64_t>(generation);
     self->event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -276,49 +298,73 @@ Java_com_hachiwii_oink_audio_NativeAudio_open(JNIEnv* env, jobject listener, jbo
     aaudio_result_t result = AAudio_createStreamBuilder(&builder);
     if (result == AAUDIO_OK && self->event >= 0) {
         AAudioStreamBuilder_setDirection(builder, input ? AAUDIO_DIRECTION_INPUT : AAUDIO_DIRECTION_OUTPUT);
-        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+        AAudioStreamBuilder_setFormat(builder, (input || lowLatency) ? AAUDIO_FORMAT_PCM_FLOAT : AAUDIO_FORMAT_PCM_I16);
         AAudioStreamBuilder_setSampleRate(builder, 48000);
         AAudioStreamBuilder_setChannelCount(builder, input ? 1 : 2);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
         AAudioStreamBuilder_setUsage(builder, AAUDIO_USAGE_MEDIA);
-        // GENERIC is Android's ordinary recording path: the device's normal
-        // microphone gain, no communication-mode voice processing. That is
-        // what the PCs (default role, no voice processing) and iOS
-        // (playAndRecord, mode default) capture, and Case A AEC runs on it there.
-        // Not UNPROCESSED: Android specifies it with no AGC at a sensitivity of
-        // -36 dBFS for a 94 dB SPL tone (CDD 5.11), so speech arrives near
-        // -60 dBFS (the NDK warns "the recorded volume may be very low"), and
-        // on the Phone it has no FAST capture profile, so AAudio fell back
-        // to 20 ms bursts (performance=10 burst=960). Not VOICE_COMMUNICATION:
-        // it adds the platform's AEC/NS/AGC, which Oink does not stack on its
-        // own Case A. Not VOICE_RECOGNITION: also AGC-free, specified at
-        // -22 dBFS for 90 dB SPL, still well under a normal recording level.
-        AAudioStreamBuilder_setInputPreset(builder, AAUDIO_INPUT_PRESET_GENERIC);
+        if (input) {
+            AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+            // GENERIC is Android's ordinary recording path: the device's normal
+            // microphone gain, no communication-mode voice processing. That is
+            // what the PCs (default role, no voice processing) and iOS
+            // (playAndRecord, mode default) capture, and Case A AEC runs on it there.
+            // Not UNPROCESSED: Android specifies it with no AGC at a sensitivity of
+            // -36 dBFS for a 94 dB SPL tone (CDD 5.11), so speech arrives near
+            // -60 dBFS (the NDK warns "the recorded volume may be very low"), and
+            // on the Phone it has no FAST capture profile, so AAudio fell back
+            // to 20 ms bursts (performance=10 burst=960). Not VOICE_COMMUNICATION:
+            // it adds the platform's AEC/NS/AGC, which Oink does not stack on its
+            // own Case A. Not VOICE_RECOGNITION: also AGC-free, specified at
+            // -22 dBFS for 90 dB SPL, still well under a normal recording level.
+            AAudioStreamBuilder_setInputPreset(builder, AAUDIO_INPUT_PRESET_GENERIC);
+        } else {
+            // Default to POWER_SAVING + PCM_I16 (Android DEEP_BUFFER media pipeline) so loudness/OEM DSP
+            // matches native media players and lowers CPU wakeups; lowLatency switches to LOW_LATENCY + float.
+            AAudioStreamBuilder_setContentType(builder, AAUDIO_CONTENT_TYPE_MUSIC);
+            AAudioStreamBuilder_setPerformanceMode(
+                builder,
+                lowLatency ? AAUDIO_PERFORMANCE_MODE_LOW_LATENCY : AAUDIO_PERFORMANCE_MODE_POWER_SAVING
+            );
+        }
         // A client session ID lets AudioRecordingCallback identify system-silenced capture.
         // Android documents a possible latency cost, so actual performance/burst are logged.
         AAudioStreamBuilder_setSessionId(builder, AAUDIO_SESSION_ID_ALLOCATE);
         AAudioStreamBuilder_setDataCallback(builder, Audio::data, self);
         AAudioStreamBuilder_setErrorCallback(builder, Audio::failed, self);
-        AAudioStreamBuilder_setFramesPerDataCallback(builder, 240);
-        AAudioStreamBuilder_setSharingMode(builder, exclusive ? AAUDIO_SHARING_MODE_EXCLUSIVE : AAUDIO_SHARING_MODE_SHARED);
+        if (input || lowLatency) {
+            AAudioStreamBuilder_setFramesPerDataCallback(builder, 240);
+        }
+        const auto mode = (input && exclusive) ? AAUDIO_SHARING_MODE_EXCLUSIVE : AAUDIO_SHARING_MODE_SHARED;
+        AAudioStreamBuilder_setSharingMode(builder, mode);
         result = AAudioStreamBuilder_openStream(builder, &self->stream);
-        if (result != AAUDIO_OK) {
+        if (result != AAUDIO_OK && mode == AAUDIO_SHARING_MODE_EXCLUSIVE) {
             AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+            result = AAudioStreamBuilder_openStream(builder, &self->stream);
+        } else if (result != AAUDIO_OK && !input && !lowLatency) {
+            AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
             result = AAudioStreamBuilder_openStream(builder, &self->stream);
         }
     }
     if (builder) AAudioStreamBuilder_delete(builder);
     if (result == AAUDIO_OK && self->stream) {
-        if (!input) AAudioStream_setBufferSizeInFrames(self->stream, 2 * AAudioStream_getFramesPerBurst(self->stream));
+        if (!input) {
+            const int32_t burst = AAudioStream_getFramesPerBurst(self->stream);
+            const int32_t capacity = AAudioStream_getBufferCapacityInFrames(self->stream);
+            if (burst > 0 && capacity > 0) {
+                AAudioStream_setBufferSizeInFrames(self->stream, std::min(2 * burst, capacity));
+            }
+        }
         int rate = AAudioStream_getSampleRate(self->stream);
         self->sampleRate = rate > 0 ? rate : 48000;
         self->channels = AAudioStream_getChannelCount(self->stream);
-        if (AAudioStream_getFormat(self->stream) == AAUDIO_FORMAT_PCM_FLOAT) {
-            if (input) self->input = oink_audio_input_create(rate, self->channels, generation);
-            else self->output = oink_audio_output_create(rate, self->channels, generation);
+        self->format = AAudioStream_getFormat(self->stream);
+        if (input && self->format == AAUDIO_FORMAT_PCM_FLOAT) {
+            self->input = oink_audio_input_create(rate, self->channels, generation);
+        } else if (!input && (self->format == AAUDIO_FORMAT_PCM_FLOAT || self->format == AAUDIO_FORMAT_PCM_I16)) {
+            self->output = oink_audio_output_create(rate, self->channels, generation);
         }
-        __android_log_print(ANDROID_LOG_INFO, "OinkAudio", "open input=%d rate=%d channels=%d preset=%d sharing=%d performance=%d burst=%d callback=%d buffer=%d session=%d generation=%lld",
-            input, rate, self->channels, input ? AAudioStream_getInputPreset(self->stream) : 0,
+        __android_log_print(ANDROID_LOG_INFO, "OinkAudio", "open input=%d rate=%d channels=%d format=%d low_latency=%d preset=%d sharing=%d performance=%d burst=%d callback=%d buffer=%d session=%d generation=%lld",
+            input, rate, self->channels, self->format, lowLatency, input ? AAudioStream_getInputPreset(self->stream) : 0,
             AAudioStream_getSharingMode(self->stream),
             AAudioStream_getPerformanceMode(self->stream), AAudioStream_getFramesPerBurst(self->stream),
             AAudioStream_getFramesPerDataCallback(self->stream), AAudioStream_getBufferSizeInFrames(self->stream),

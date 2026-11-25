@@ -34,8 +34,25 @@ class LowLatencyWifiTest {
         assertEquals("high performance", highPerformance, highPerformanceHeld)
     }
 
-    private fun audio(speaker: Boolean = false, microphone: Boolean = false, joined: Boolean = true) =
-        AppState(localAudio = LocalAudio(speakerOn = speaker, microphoneOn = microphone, joined = joined))
+    private fun audio(
+        speaker: Boolean = false,
+        microphone: Boolean = false,
+        forward: Boolean = false,
+        speakerRunning: Boolean = speaker,
+        microphoneRunning: Boolean = microphone,
+        forwardRunning: Boolean = forward,
+        joined: Boolean = true,
+    ) = AppState(
+        localAudio = LocalAudio(
+            speakerOn = speaker,
+            microphoneOn = microphone,
+            forwardOn = forward,
+            speakerRunning = speakerRunning,
+            microphoneRunning = microphoneRunning,
+            forwardRunning = forwardRunning,
+            joined = joined,
+        )
+    )
 
     @Test
     fun planFollowsScreensAndAudioRole() {
@@ -126,7 +143,10 @@ class LowLatencyWifiTest {
         // A group switch: switch still on, not joined yet.
         state.value = audio(microphone = true, joined = false)
         wifi.assertHeld(lowLatency = false, highPerformance = false)
-        state.value = audio(microphone = true)
+        // Switch armed in idle state without active running stream: must NOT hold audio Wi-Fi locks.
+        state.value = audio(speaker = true, speakerRunning = false, joined = true)
+        wifi.assertHeld(lowLatency = false, highPerformance = false)
+        state.value = audio(microphone = true, joined = true)
         screen.registry.currentState = Lifecycle.State.STARTED
         // The service stops while the role is held and a screen is visible: the screen keeps its lock.
         service.cancelAndJoin()

@@ -62,12 +62,12 @@ export function renderLayout(
 // Resolve card presentation after history so names and connectivity stay live.
 export function presentScreens(
   screens: Screen[],
-    devices: ReadonlyArray<Pick<Device, 'id' | 'name' | 'group' | 'privileged'>>,
+    devices: ReadonlyArray<Pick<Device, 'id' | 'name' | 'group' | 'privileged' | 'paused'>>,
 ): Screen[] {
     const cards = new Map(devices.map(device => [device.id, device]));
     return screens.map(screen => {
         const device = cards.get(screen.device ?? '');
-        return { ...screen, name: device?.name ?? screen.name, privileged: device?.privileged, offline: device?.group === 'offline' || (screen.android === true && device?.privileged === false) };
+        return { ...screen, name: device?.name ?? screen.name, privileged: device?.privileged, offline: device?.group === 'offline' || (screen.android === true && device?.privileged === false), paused: device?.paused };
     });
 }
 
@@ -101,6 +101,6 @@ export function visibleScreens(
   return screens.filter(screen => {
     const owner = devices.find(device => device.id === screen.device);
     const backend = layout?.geometry.screens.find(item => `${item.key.device}:${item.key.display}` === screen.id);
-    return !owner?.accessibilityMissing && !owner?.paused && owner?.screenSharing !== false && owner?.screen !== 'disabled' && !backend?.hidden && !backend?.device_disabled;
+    return !owner?.accessibilityMissing && owner?.screenSharing !== false && owner?.screen !== 'disabled' && !backend?.hidden && !backend?.device_disabled;
   });
 }

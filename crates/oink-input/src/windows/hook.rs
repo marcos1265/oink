@@ -104,13 +104,19 @@ pub(super) const WM_APP_COVER_READY: u32 = WM_APP + 3;
 pub(super) const WM_APP_COVER_HIDDEN: u32 = WM_APP + 4;
 pub(super) const WM_APP_COVER_PLACED: u32 = WM_APP + 5;
 const WM_APP_PARK_COMPLETE: u32 = WM_APP + 6;
+pub(super) const WM_APP_SHELL_RESET: u32 = WM_APP + 9;
+pub(super) const WM_APP_RAW_CAPTURE_READY: u32 = WM_APP + 10;
 /// The logon password-field focus changed (pre-login profile; see credential_focus).
 const WM_CAPTURE_CREDENTIAL: u32 = WM_APP + 21;
 /// 鼠标钩子回调重入、事件没经过截获就放行的次数（检测日志）。
 static REENTERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const WATCHDOG_TIMER: usize = 1;
 const MOUSE_KEYS_TIMER: usize = 5;
+const PARK_TIMER: usize = 6;
+const RAW_CAPTURE_TIMER: usize = 7;
 const TOUCHPAD_END_TIMER: usize = 3;
+const RAW_CAPTURE_REFRESH_MS: u32 = 200;
+const PARK_TIMEOUT_MS: u32 = 400;
 const WATCHDOG_MS: u32 = 1000;
 /// Raw Input 有输入、而钩子超过这么久没被调用 → 认为钩子被卸载了。
 const HOOK_SILENT: Duration = Duration::from_millis(1000);
@@ -122,6 +128,7 @@ pub(crate) type RestoreCompletion = Box<dyn FnOnce(bool) + Send>;
 pub(crate) enum Command {
     DragAnchor(Option<oink_foundation::dnd::DragAnchor>, mpsc::SyncSender<bool>),
     RelativeCapture(bool),
+    SetIndependentMouse(mpsc::SyncSender<Option<Marker>>),
     SetMode(CaptureMode, mpsc::SyncSender<Option<Marker>>),
     RestoreLocal(Point, Option<RestoreCompletion>, mpsc::SyncSender<Option<Marker>>),
     Touchpad(
@@ -146,6 +153,12 @@ pub(crate) fn apply_drag_anchor_here(anchor: Option<oink_foundation::dnd::DragAn
 }
 
 /// 标记类型取 "ACRW" 的低 16 位；高 16 位是本次请求的票号（见模块说明）。
+static INDEPENDENT_MOUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_independent_mouse(enabled: bool) {
+    INDEPENDENT_MOUSE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 const TRANSITION_TAG: usize = 0x4F49_4E57;
 // Windows 11 10.0.26200 delivered only the low 32 bits of SendInput's extra
 // info to this hook, even in a 64-bit process. Keep both identity and ticket
@@ -306,10 +319,13 @@ struct State {
     drag_anchor: Option<oink_foundation::dnd::DragAnchor>,
     touchpad: super::touchpad::Touchpad,
     raw_capture: super::raw_capture::RawCapture,
+    raw_capture_timer_armed: bool,
     relative_requested: bool,
     handler: EventHandler,
     mode: CaptureMode,
     park: POINT,
+    remote_park: Option<POINT>,
+    last_physical_mouse: Option<Instant>,
     hooks: HookApi,
     mouse_hook: Option<HHOOK>,
     kbd_hook: Option<HHOOK>,
@@ -515,12 +531,23 @@ pub(crate) fn cancel_touchpad_here() {
 
 /// 在截获线程上切换模式：钩子回调里立即执行；否则等标记事件（见模块说明），标记由临时线程注入。
 pub(crate) fn apply_mode_here(mode: CaptureMode) -> Result<(), InputError> {
-    request_here(Transition::of_mode(mode))
+    let t = Transition::of_mode(mode);
+    with_state(|st| {
+        st.remote_park = match t {
+            Transition::Remote(p) => Some(p),
+            Transition::Local(_) => None,
+        };
+    });
+    request_here(t)
 }
 
 /// 在截获线程上回到 `Local` 并把光标放到 `at`（执行时机同 [`apply_mode_here`]）。
 pub(crate) fn restore_local_here(at: Point, complete: Option<RestoreCompletion>) -> Result<(), InputError> {
-    let marker = with_state(|st| st.request_restore(at, complete)).ok_or(InputError::NotStarted)?;
+    let marker = with_state(|st| {
+        st.remote_park = None;
+        st.request_restore(at, complete)
+    })
+    .ok_or(InputError::NotStarted)?;
     if let Some(marker) = marker {
         dispatch_marker(marker);
     }
@@ -653,6 +680,16 @@ impl HookHandle {
         let (tx, rx) = mpsc::sync_channel(1);
         self.post(Command::SetMode(mode, tx))?;
         Self::finish_request(&rx)
+    }
+
+    pub(crate) fn set_independent_mouse(&self, enabled: bool) -> Result<(), InputError> {
+        set_independent_mouse(enabled);
+        if enabled {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.post(Command::SetIndependentMouse(tx))?;
+            return Self::finish_request(&rx);
+        }
+        Ok(())
     }
 
     pub(crate) fn set_drag_anchor(&self, anchor: Option<oink_foundation::dnd::DragAnchor>) -> Result<(), InputError> {
@@ -800,18 +837,21 @@ fn run(
         {
             tracing::warn!("注册 Raw Input 失败（无法区分触摸板、看门狗失效）：{e}");
         }
-        let hider = Hider::new(Strategy::from_env());
+        let hider = Hider::new_with_reply(Strategy::from_env(), hwnd);
         let mut cur = POINT::default();
         let _ = GetCursorPos(&mut cur);
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
                 touchpad: super::touchpad::Touchpad::new(),
                 raw_capture: super::raw_capture::RawCapture::default(),
+                raw_capture_timer_armed: false,
                 relative_requested: false,
                 drag_anchor: None,
                 handler,
                 mode: CaptureMode::Local,
                 park: cur,
+                remote_park: None,
+                last_physical_mouse: None,
                 hooks: NATIVE_HOOKS,
                 mouse_hook: None,
                 kbd_hook: None,
@@ -899,6 +939,7 @@ fn run(
                             if let Some(observations) = &observations {
                                 observations.set_capturing(false);
                             }
+                            st.disarm_park_timer();
                             st.capture_enabled = false;
                             st.cancel_restore();
                             st.transitions += 1;
@@ -909,11 +950,12 @@ fn run(
                             st.hider.cancel_park();
                             st.hider.show();
                             st.mode = CaptureMode::Local;
+                            st.remote_park = None;
                             st.relative_requested = false;
                             st.drag_anchor = None;
                             st.restore_watch = None;
                             st.restoring_from_marker = None;
-                            st.raw_capture.update(false, st.park);
+                            st.stop_raw_capture();
                             st.touchpad.cancel_all();
                             st.uninstall_hooks();
                             rawinput::unregister();
@@ -988,9 +1030,10 @@ fn run(
         // 清理：卸载钩子、恢复光标、注销 Raw Input
         let _ = KillTimer(Some(hwnd), WATCHDOG_TIMER);
         let _ = KillTimer(Some(hwnd), TOUCHPAD_END_TIMER);
+        let _ = KillTimer(Some(hwnd), RAW_CAPTURE_TIMER);
         if let Some(mut st) = STATE.with(|s| s.borrow_mut().take()) {
             st.cancel_restore();
-            st.raw_capture.update(false, st.park);
+            st.stop_raw_capture();
             st.uninstall_hooks();
             st.hider.show();
             let stats = st.snapshot();
@@ -1035,21 +1078,53 @@ fn process_commands() {
                     st.update_raw_capture();
                 });
             }
+            Some(Command::SetIndependentMouse(reply)) => {
+                let marker = with_state(|st| {
+                    if !matches!(st.mode, CaptureMode::Local) || st.hider.is_hidden() || st.hider.is_cover_visible()
+                    {
+                        if crate::capture_loop::mouse_local() || crate::capture_loop::mouse_disabled() {
+                            st.remote_park = None;
+                        }
+                        st.request(Transition::Local(None))
+                    } else {
+                        if crate::capture_loop::mouse_local() || crate::capture_loop::mouse_disabled() {
+                            st.remote_park = None;
+                        }
+                        None
+                    }
+                })
+                .flatten();
+                let _ = reply.send(marker);
+            }
             Some(Command::SetMode(mode, reply)) => {
-                let marker = with_state(|st| st.request(Transition::of_mode(mode))).flatten();
+                let marker = with_state(|st| {
+                    let t = Transition::of_mode(mode);
+                    st.remote_park = match t {
+                        Transition::Remote(p) => Some(p),
+                        Transition::Local(_) => None,
+                    };
+                    st.request(t)
+                })
+                .flatten();
                 let _ = reply.send(marker);
             }
             Some(Command::RestoreLocal(at, complete, reply)) => {
-                let marker = with_state(|st| st.request_restore(at, complete)).flatten();
+                let marker = with_state(|st| {
+                    st.remote_park = None;
+                    st.request_restore(at, complete)
+                })
+                .flatten();
                 let _ = reply.send(marker);
             }
             Some(Command::Stop) => {
                 with_state(|st| {
+                    st.disarm_park_timer();
                     st.cancel_restore();
                     st.touchpad.cancel_all();
-                    st.raw_capture.update(false, st.park);
+                    st.stop_raw_capture();
                     st.pending = None;
                     st.mode = CaptureMode::Local;
+                    st.remote_park = None;
                     st.hider.show();
                 });
                 // SAFETY: 结束本线程的消息循环。
@@ -1172,6 +1247,41 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 st.hider.finish_show(wparam.0 as u64);
                 st.check_restore_completion();
             });
+            LRESULT(0)
+        }
+        WM_APP_SHELL_RESET => {
+            let shell_restarted = wparam.0 != 0;
+            with_state(|st| {
+                st.disarm_park_timer();
+                st.park_marker = None;
+                st.park_acceptance = None;
+                st.hider.cancel_park();
+                if matches!(st.mode, CaptureMode::Local) {
+                    st.hider.show_safely();
+                }
+                st.update_raw_capture();
+                if st.capture_enabled {
+                    if !st.ordinary_observer && rawinput::registration_ok(st.hwnd).is_err() {
+                        let _ = rawinput::register(st.hwnd);
+                    }
+                    if shell_restarted {
+                        st.move_hook_to_front(HookKind::Mouse);
+                        st.move_hook_to_front(HookKind::Keyboard);
+                    }
+                }
+            });
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == PARK_TIMER => {
+            with_state(State::handle_park_timeout);
+            LRESULT(0)
+        }
+        WM_APP_RAW_CAPTURE_READY => {
+            with_state(State::update_raw_capture);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == RAW_CAPTURE_TIMER => {
+            with_state(State::update_raw_capture);
             LRESULT(0)
         }
         restore::MESSAGE => {
@@ -1465,6 +1575,14 @@ impl State {
             }
             self.stats.hook_reinstalls += 1;
         }
+        if matches!(self.mode, CaptureMode::Local)
+            && self.pending.is_none()
+            && !self.hider.is_hidden()
+            && self.hider.is_cover_visible()
+        {
+            tracing::warn!("cursor cover remained visible in Local mode; hiding");
+            self.hider.show_safely();
+        }
         self.diagnostic_ticks += 1;
         let counts = std::mem::take(&mut self.pipeline);
         if counts.mouse_callbacks + counts.keyboard_callbacks != 0 || self.diagnostic_ticks.is_multiple_of(5) {
@@ -1525,7 +1643,7 @@ impl State {
         // Release our game clip before Windows calculates the absolute marker
         // target. Releasing it in the callback would leave info.pt clipped to park.
         if matches!(t, Transition::Local(_)) {
-            self.raw_capture.update(false, self.park);
+            self.stop_raw_capture();
         }
         let marker = Marker {
             target: match (t, self.drag_anchor) {
@@ -1579,7 +1697,7 @@ impl State {
                 }
                 self.cancel_restore();
                 let from = cursor_pos();
-                self.raw_capture.update(false, self.park);
+                self.stop_raw_capture();
                 // GiveFeedback can replace SetCursor(NULL). The live catcher
                 // spans departure, outer bottom corner, and re-entry, so one
                 // accounted move hides the arrow without changing OLE targets.
@@ -1601,6 +1719,11 @@ impl State {
                 } else {
                     self.hider.hide(from, p, self.hwnd)
                 };
+                if parked {
+                    self.disarm_park_timer();
+                } else {
+                    self.arm_park_timer();
+                }
                 self.restore_watch = None;
                 self.park = if parked { p } else { from };
                 self.mode = CaptureMode::Remote {
@@ -1609,8 +1732,11 @@ impl State {
                 self.update_raw_capture();
             }
             Transition::Local(at) => {
+                self.disarm_park_timer();
+                self.park_marker = None;
+                self.park_acceptance = None;
                 self.hider.cancel_park();
-                self.raw_capture.update(false, self.park);
+                self.stop_raw_capture();
                 if let Some(p) = at.filter(|_| via != Via::Marker) {
                     // 光标仍隐藏（遮罩在停靠点）时放到落点，再撤掉遮罩。
                     let placed = place_cursor(p).is_ok();
@@ -1652,6 +1778,56 @@ impl State {
         }
     }
 
+    fn arm_park_timer(&self) {
+        if !self.hwnd.is_invalid() {
+            // SAFETY: this hook thread owns self.hwnd and PARK_TIMER.
+            unsafe {
+                SetTimer(Some(self.hwnd), PARK_TIMER, PARK_TIMEOUT_MS, None);
+            }
+        }
+    }
+
+    fn disarm_park_timer(&self) {
+        if !self.hwnd.is_invalid() {
+            // SAFETY: this hook thread owns self.hwnd and PARK_TIMER.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), PARK_TIMER);
+            }
+        }
+    }
+
+    fn handle_park_timeout(&mut self) {
+        self.disarm_park_timer();
+        if !self.hider.park_pending() {
+            return;
+        }
+        let target = self.hider.pending_park_target().or(self.remote_park);
+        self.park_marker = None;
+        self.park_acceptance = None;
+        self.hider.cancel_park();
+        // Never leave the stretched [from..park] cover window stuck on screen as a dead zone.
+        self.hider.show_safely();
+        // If we are still in Remote mode and the OS cursor remained clamped at a monitor
+        // edge because parking failed/timed out, relocate off the edge so deltas work.
+        if matches!(self.mode, CaptureMode::Remote { .. })
+            && self.drag_anchor.is_none()
+            && self.pending.is_none()
+            && let Some(target) = target
+        {
+            let cur = cursor_pos();
+            if point_near_monitor_edge(cur, 4) && target != cur && place_cursor(target).is_ok() {
+                self.park = target;
+                self.mode = CaptureMode::Remote { park: to_point(target) };
+                tracing::warn!(
+                    from = ?(cur.x, cur.y),
+                    park = ?(target.x, target.y),
+                    "cursor cover park timed out; hid stretched cover and moved pointer off screen edge"
+                );
+            }
+        }
+        self.update_raw_capture();
+    }
+
     fn wants_raw_capture(&self) -> bool {
         let restoring = self
             .pending
@@ -1660,11 +1836,43 @@ impl State {
             && self.drag_anchor.is_none()
             && !restoring
             && !self.hider.park_pending()
+            && (self.hider.strategy() != Strategy::Window || self.hider.is_hidden())
             && matches!(self.mode, CaptureMode::Remote { .. })
     }
 
+    fn arm_raw_capture_timer(&mut self) {
+        if !self.raw_capture_timer_armed && !self.hwnd.is_invalid() {
+            // SAFETY: this hook thread owns self.hwnd and RAW_CAPTURE_TIMER.
+            unsafe {
+                SetTimer(Some(self.hwnd), RAW_CAPTURE_TIMER, RAW_CAPTURE_REFRESH_MS, None);
+            }
+            self.raw_capture_timer_armed = true;
+        }
+    }
+
+    fn disarm_raw_capture_timer(&mut self) {
+        if self.raw_capture_timer_armed && !self.hwnd.is_invalid() {
+            // SAFETY: this hook thread owns self.hwnd and RAW_CAPTURE_TIMER.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), RAW_CAPTURE_TIMER);
+            }
+        }
+        self.raw_capture_timer_armed = false;
+    }
+
+    fn stop_raw_capture(&mut self) {
+        self.disarm_raw_capture_timer();
+        self.raw_capture.update(false, self.park, 0);
+    }
+
     fn update_raw_capture(&mut self) {
-        self.raw_capture.update(self.wants_raw_capture(), self.park);
+        let enabled = self.wants_raw_capture();
+        if enabled {
+            self.arm_raw_capture_timer();
+        } else {
+            self.disarm_raw_capture_timer();
+        }
+        self.raw_capture.update(enabled, self.park, self.hwnd.0 as isize);
     }
 
     fn cover_acknowledged(&mut self, generation: u64) -> Option<Marker> {
@@ -1744,6 +1952,7 @@ impl State {
             return;
         }
         self.park_commit.complete(generation);
+        self.disarm_park_timer();
         self.park_acceptance = None;
         self.park = marker.target;
         self.mode = CaptureMode::Remote {
@@ -1943,6 +2152,18 @@ impl State {
         if inject::own_mouse_tag(info.dwExtraInfo) {
             return self.prepare_own_mouse(msg, info);
         }
+        if external::mouse_origin(info) == crate::windows_external_input::Origin::Physical {
+            self.last_physical_mouse = Some(now);
+            if INDEPENDENT_MOUSE.load(std::sync::atomic::Ordering::Relaxed)
+                && !crate::capture_loop::mouse_local()
+                && !crate::capture_loop::mouse_disabled()
+                && let Some(park) = self.remote_park
+                && matches!(self.mode, CaptureMode::Local)
+                && self.pending.is_none()
+            {
+                self.execute(Transition::Remote(park), Via::InHook);
+            }
+        }
         // One snapshot must feed both stale-step classification and subtraction.
         // On Windows 11 the accepted absolute marker can precede native readback:
         // using entry for classification but park for subtraction leaks the entire
@@ -2018,10 +2239,13 @@ impl State {
                         // that native source through DragLeave instead.
                         if !self.hider.park_pending() {
                             let target = self.park;
-                            self.raw_capture.update(false, self.park);
+                            self.stop_raw_capture();
                             if !self.hider.hide(native, target, self.hwnd) {
+                                self.arm_park_timer();
                                 self.park = native;
                                 self.mode = CaptureMode::Remote { park: to_point(native) };
+                            } else {
+                                self.disarm_park_timer();
                             }
                         }
                     }
@@ -2458,6 +2682,29 @@ fn call_handler(handler: &EventHandler, event: &CapturedEvent) -> Disposition {
     d
 }
 
+fn point_near_monitor_edge(p: POINT, margin: i32) -> bool {
+    #[cfg(all(test, debug_assertions))]
+    if super::cursor::test_native::active() {
+        return p.x <= margin || p.x >= 3840 - 1 - margin || p.y <= margin || p.y >= 2160 - 1 - margin;
+    }
+    // SAFETY: read-only monitor bounds query for the given physical coordinate.
+    unsafe {
+        let monitor = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
+        let r = info.rcMonitor;
+        p.x <= r.left + margin
+            || p.x >= r.right.saturating_sub(1).saturating_sub(margin)
+            || p.y <= r.top + margin
+            || p.y >= r.bottom.saturating_sub(1).saturating_sub(margin)
+    }
+}
+
 /// The Default lock curtain remains capturable with UIAccess. Only inaccessible
 /// desktops gate the source; WTS lock is a notification to re-query, not a gate.
 fn capture_availability_changed(desktop_changed: bool) {
@@ -2477,6 +2724,29 @@ fn capture_availability_changed(desktop_changed: bool) {
             return None;
         }
         st.touchpad.cancel_all();
+        st.disarm_park_timer();
+        st.cancel_restore();
+        st.pending = None;
+        st.park_marker = None;
+        st.park_acceptance = None;
+        st.stop_raw_capture();
+        st.hider.cancel_park();
+        if !available {
+            st.mode = CaptureMode::Local;
+            st.remote_park = None;
+            st.hider.show_safely();
+        } else if desktop_changed {
+            if matches!(st.mode, CaptureMode::Local) {
+                st.hider.show_safely();
+            }
+            if st.capture_enabled {
+                if !st.ordinary_observer && rawinput::registration_ok(st.hwnd).is_err() {
+                    let _ = rawinput::register(st.hwnd);
+                }
+                st.move_hook_to_front(HookKind::Mouse);
+                st.move_hook_to_front(HookKind::Keyboard);
+            }
+        }
         st.keys.clear();
         st.key_outputs.clear();
         st.passed_modifiers = Default::default();
@@ -2637,9 +2907,41 @@ fn mouse_proc_with_next(code: i32, wparam: WPARAM, lparam: LPARAM, next: impl Fn
             return external::pass_mouse(wparam.0 as u32, info, next);
         }
         let origin_kind = external::mouse_origin(info);
+        let now = Instant::now();
         if origin_kind == crate::windows_external_input::Origin::External
-            && external::mouse_local(wparam.0 as u32, info)
+            && (external::mouse_local(wparam.0 as u32, info)
+                || INDEPENDENT_MOUSE.load(std::sync::atomic::Ordering::Relaxed))
         {
+            if INDEPENDENT_MOUSE.load(std::sync::atomic::Ordering::Relaxed) {
+                let physical_shared = !crate::capture_loop::mouse_local() && !crate::capture_loop::mouse_disabled();
+                let _in_hook = InHook::enter();
+                let swallow_echo = with_state(|st| {
+                    if physical_shared
+                        && st.remote_park.is_some()
+                        && st
+                            .last_physical_mouse
+                            .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_millis(300))
+                    {
+                        return wparam.0 as u32 == WM_MOUSEMOVE;
+                    }
+                    if !matches!(st.mode, CaptureMode::Local) || st.hider.is_hidden() || st.hider.is_cover_visible() {
+                        st.pending = None;
+                        st.park_marker = None;
+                        st.park_acceptance = None;
+                        if !physical_shared {
+                            st.remote_park = None;
+                        }
+                        st.execute(Transition::Local(None), Via::InHook);
+                    } else if !physical_shared {
+                        st.remote_park = None;
+                    }
+                    false
+                })
+                .unwrap_or(false);
+                if swallow_echo {
+                    return LRESULT(1);
+                }
+            }
             return external::pass_mouse(wparam.0 as u32, info, next);
         }
         if origin_kind == crate::windows_external_input::Origin::Physical {
@@ -2649,7 +2951,6 @@ fn mouse_proc_with_next(code: i32, wparam: WPARAM, lparam: LPARAM, next: impl Fn
                 unsafe { windows::Win32::System::SystemInformation::GetTickCount() }.wrapping_sub(info.time),
             );
         }
-        let now = Instant::now();
         let owns_wheel = with_state(|st| st.touchpad.owns_ambiguous_wheel(now)).unwrap_or(false);
         // Read before borrowing State: PeekMessage can dispatch sent messages.
         let origin = super::wheel_origin::hook(wparam.0 as u32, info, owns_wheel);
@@ -2661,6 +2962,10 @@ fn mouse_proc_with_next(code: i32, wparam: WPARAM, lparam: LPARAM, next: impl Fn
         // Check before raw-capture MOVE and native touchpad wheel bypasses.
         // Own injections/markers and external applications retain their paths.
         if origin_kind == crate::windows_external_input::Origin::Physical && crate::capture_loop::mouse_disabled() {
+            with_state(|st| {
+                st.last_mouse_hook = now;
+                st.pipeline.mouse_callbacks += 1;
+            });
             return LRESULT(1);
         }
         let prepared = with_state(|st| {
@@ -3459,6 +3764,8 @@ mod tests {
                 park: to_point(p(1920, 1080)),
             },
             park: p(1920, 1080),
+            remote_park: None,
+            last_physical_mouse: None,
             hooks: NATIVE_HOOKS,
             mouse_hook: None,
             kbd_hook: None,
@@ -3475,6 +3782,7 @@ mod tests {
             hwnd: HWND::default(),
             raw: RawTracker::default(),
             raw_capture: super::super::raw_capture::RawCapture::default(),
+            raw_capture_timer_armed: false,
             relative_requested: false,
             drag_anchor: None,
             keys: HashMap::new(),
@@ -4567,5 +4875,29 @@ mod tests {
     fn our_absolute_moves_may_jump() {
         let mut w = watch();
         assert_eq!(w.check(p(2988, 2159), p(1500, 900), false), None);
+    }
+
+    #[test]
+    fn park_timeout_hides_stretched_cover_and_relocates_edge_clamped_pointer() {
+        use super::super::cursor::test_native as native;
+        let from = p(3839, 1000);
+        let park = p(1920, 1080);
+        let _native = native::Guard::at(from);
+        let mut st = remote_state();
+        st.hider = native::hider();
+        st.remote_park = Some(park);
+        st.relative_requested = true;
+        st.execute(Transition::Remote(park), Via::InHook);
+        assert!(st.hider.park_pending());
+        assert!(st.hider.is_hidden());
+        assert_eq!(st.park, from);
+
+        // Cover ACK never arrived -> PARK_TIMER fires handle_park_timeout.
+        st.handle_park_timeout();
+        assert!(!st.hider.park_pending());
+        assert!(!st.hider.is_hidden(), "stretched cover must be hidden on timeout");
+        assert!(!st.wants_raw_capture(), "never clip without a cover window");
+        assert_eq!(cursor_pos(), park, "edge-clamped cursor must move off edge to park");
+        assert_eq!(st.park, park);
     }
 }

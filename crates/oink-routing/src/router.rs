@@ -877,7 +877,22 @@ impl Router {
             }
         }
         let preference_changed = self.cfg.settings.game_mode_preference != settings.game_mode_preference;
+        let enabled_independent = !self.cfg.settings.independent_mouse && settings.independent_mouse;
         self.cfg.settings = settings;
+        if enabled_independent && self.local_mouse_hidden {
+            self.local_mouse_hidden = false;
+            if let Some(p) = self
+                .local_cursor
+                .as_ref()
+                .or(self.exit_point.as_ref())
+                .cloned()
+                .or_else(|| self.display_center())
+            {
+                self.out.push(Output::RestoreLocal { at: p.local });
+            } else {
+                self.out.push(Output::SetMode(CaptureMode::Local));
+            }
+        }
         self.publish_lock_escape();
         if preference_changed {
             self.apply_game_preference();
@@ -951,7 +966,11 @@ impl Router {
                 .or(self.displays.first())
                 .map(|d| d.key.clone());
         }
-        if self.holder != me && (!self.mouse_local() || self.local_mouse_hidden) && !self.displays.is_empty() {
+        if self.holder != me
+            && ((!self.mouse_local() && !(self.mouse_disabled() && self.cfg.settings.independent_mouse))
+                || self.local_mouse_hidden)
+            && !self.displays.is_empty()
+        {
             // Refresh the native source park/owned clip too; its old display may
             // have disappeared or its center may be outside the new mode.
             self.out.push(Output::SetMode(CaptureMode::Remote {
@@ -2078,7 +2097,11 @@ impl Router {
         // 1. 系统把光标移到了本机的另一块屏幕：按布局看这一步从原来的屏幕出发通往哪里。
         //    通往其他设备（布局里本机屏幕之间的排列与系统排列不同）→ 移交；否则尊重系统的跨屏。
         if let Some(prev) = prev.clone().filter(|p| p.screen != cur.screen && p.screen.device == me) {
-            if let Some(dst) = self.layout.exit_through_edge(&prev, (dx, dy))
+            let blocked_by_tweak = self
+                .display_bounds(&prev.screen.display)
+                .is_some_and(|b| self.edge_warp_blocked(b, prev.local, true));
+            if !blocked_by_tweak
+                && let Some(dst) = self.layout.exit_through_edge(&prev, (dx, dy))
                 && dst.screen.device != me
                 && self.input_ready(dst.screen.device)
                 && !self.leave_blocked()
@@ -2113,7 +2136,10 @@ impl Router {
         // early (or at the inclusive left/top edge), skipping the entire gap.
         // Keep OS cursor tracking above, including completed same-device moves;
         // held buttons and native drags still take the stitching path below.
-        if self.gap_allowed() && !self.hidden_entry(me, &cur.screen.display) {
+        if self.gap_allowed()
+            && !self.hidden_entry(me, &cur.screen.display)
+            && !(self.gap.is_none() && self.edge_warp_blocked(bounds, cur.local, true))
+        {
             self.retain_resistance(&cur, me, (dx, dy));
             self.dnd_off_edge();
             return Disposition::Pass;
@@ -2176,6 +2202,11 @@ impl Router {
             self.out.push(Output::Inject(InjectEvent::MoveTo { pos: dst.local }));
             self.pointer = Some(dst);
             return Disposition::Swallow;
+        }
+        if self.edge_warp_blocked(bounds, c, true) {
+            self.resistance = None;
+            self.dnd_off_edge();
+            return Disposition::Pass;
         }
         if !self.input_ready(dst.screen.device) || self.leave_blocked() {
             self.diagnostic(DecisionKind::Refused, self.refusal_reason(), Some(&dst));
@@ -3502,7 +3533,12 @@ impl Router {
             }
             return;
         }
-        if self.leave_blocked() || !self.input_ready(r.to.screen.device) {
+        if self.leave_blocked()
+            || !self.input_ready(r.to.screen.device)
+            || self
+                .display_bounds(&from.screen.display)
+                .is_some_and(|b| self.in_corner_dead_zone(b, from.local))
+        {
             self.report_edge(origin, EdgeState::Blocked, screenless::edge_side(dx, dy), None);
             self.diagnostic(DecisionKind::Refused, self.refusal_reason(), Some(&r.to));
             self.resistance = None;
@@ -4213,7 +4249,12 @@ impl Router {
             // Leaving a shared destination hides its cursor regardless of its
             // physical source mode. An independent cursor revealed during gap
             // travel already belongs to the local mouse and stays usable.
-            if !self.mouse_local() || !was_gap || self.local_mouse_hidden {
+            // When the physical mouse is disabled and independent_mouse is on,
+            // leave the cursor uncovered so external/Moonlight pointers never
+            // hit an invisible cover rectangle.
+            if !(self.mouse_disabled() && self.cfg.settings.independent_mouse)
+                && (!self.mouse_local() || !was_gap || self.local_mouse_hidden)
+            {
                 self.local_mouse_hidden = self.mouse_local();
                 let park = self.park_point();
                 self.out.push(Output::SetMode(CaptureMode::Remote { park }));
@@ -4649,6 +4690,34 @@ impl Router {
                 || self.dnd_returning_left(None)
                 // 正在把拖拽交出去：左键已由平台抬起，但移交要等本机的拖拽结束。
                 || self.dnd_leaving())
+    }
+
+    fn display_bounds(&self, display: &str) -> Option<Rect> {
+        self.displays.iter().find(|d| d.key == display).map(|d| d.bounds)
+    }
+
+    fn in_corner_dead_zone(&self, bounds: Rect, at: Point) -> bool {
+        if !self.cfg.settings.corner_dead_zone_enabled || self.cfg.settings.corner_dead_zone_px == 0 {
+            return false;
+        }
+        let dz = f64::from(self.cfg.settings.corner_dead_zone_px);
+        let near_x = (at.x - bounds.x) < dz || (bounds.right() - at.x) < dz;
+        let near_y = (at.y - bounds.y) < dz || (bounds.bottom() - at.y) < dz;
+        near_x && near_y
+    }
+
+    fn ctrl_warp_allowed(&self) -> bool {
+        if !self.cfg.settings.require_ctrl_to_warp {
+            return true;
+        }
+        self.physical_keys.contains(&KeyCode::LEFT_CTRL)
+            || self.physical_keys.contains(&KeyCode::RIGHT_CTRL)
+            || self.keys.contains_key(&KeyCode::LEFT_CTRL)
+            || self.keys.contains_key(&KeyCode::RIGHT_CTRL)
+    }
+
+    fn edge_warp_blocked(&self, bounds: Rect, at: Point, check_ctrl: bool) -> bool {
+        self.in_corner_dead_zone(bounds, at) || (check_ctrl && !self.ctrl_warp_allowed())
     }
 
     /// 通往其他设备的边是墙：拖动中（`handoff_blocked`）、锁定当前焦点、共享暂停。

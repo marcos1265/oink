@@ -2695,6 +2695,7 @@ fn speaker_card(
             offline_reason: OfflineKind::Disconnected,
             last_seen_ms: None,
             rtt_ms: None,
+            connected_address: None,
             live_boot: Some(nonce),
             facts: Some(facts),
             capabilities: vec!["oink.device/2".into(), "oink.device/2".into()],

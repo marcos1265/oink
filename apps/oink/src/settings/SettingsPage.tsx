@@ -6,8 +6,8 @@ import type { MotionMode, ThemeMode } from 'oink-ui';
 import type { Platform } from '../window/DesktopWindow';
 import { ACCENT_SWATCHES, DEFAULT_ACCENT } from './appearance';
 import type { ReceivedFilesCleanup } from '../api/types';
-import { ApiFailure, api as backend, shell } from '../api/client';
-import type { AutoUnlockFailure, AutoUnlockStatus, AutoUnlockSyncSkip } from '../api/client';
+import { api as backend, shell } from '../api/client';
+import type { AutoUnlockStatus } from '../api/client';
 import { agent, useAgent } from '../api/store';
 import { MicrophoneInput } from './MicrophoneInput';
 import { ScreenPointerGains } from './ScreenPointerGains';
@@ -20,8 +20,6 @@ import { PermissionRow } from '../permissions/PermissionRow';
 import { PermissionControl } from '../permissions/PermissionControl';
 import { useGrant } from './useGrant';
 import { UninstallControl } from './UninstallControl';
-import { AutoUnlockControl } from './AutoUnlock';
-import { UpdateChannel, UpdateCheck, UpdatePreferences, manualUpdates } from './UpdatePreferences';
 import { SHORTCUTS, deviceShortcuts, ShortcutRecorder, spokenKeys } from './Shortcuts';
 import type { ShortcutId } from './Shortcuts';
 import type { LogLevel, PermissionId, Prefs, PrefsApi } from './prefs';
@@ -44,25 +42,6 @@ function hl(s: string, q: string): ReactNode {
         return s;
     return <>{s.slice(0, i)}<mark className="setp__hit">{s.slice(i, i + k.length)}</mark>{s.slice(i + k.length)}</>;
 }
-function autoUnlockFailureText(failure: AutoUnlockFailure): string {
-    switch (failure) {
-        case 'password_incorrect': return tr('上次解锁失败：密码错误，请修改密码');
-        case 'windows_hello_only': return tr('上次解锁失败：已开启“仅允许 Windows Hello 登录”，请在设置中关闭');
-        case 'login_ui_not_ready': return tr('上次解锁失败：登录界面未就绪，请检查锁屏状态后重试');
-        case 'unknown': return tr('上次解锁失败：未知原因，请检查设置和登录界面');
-    }
-}
-/** A skipped sync unlock needs no action: secondary text, never the alert icon. */
-function syncUnlockSkipText(kind: AutoUnlockSyncSkip): string {
-    switch (kind) {
-        case 'lock_screen': return tr('上次同步解锁未执行：锁屏画面未收起');
-        case 'display_wake': return tr('上次同步解锁未执行：无法唤醒屏幕');
-        case 'password_field': return tr('上次同步解锁未执行：锁屏密码框未就绪');
-        case 'source_locked': return tr('上次同步解锁未执行：发起的设备已重新锁定');
-        case 'local_typing': return tr('上次同步解锁未执行：本机正在输入');
-        case 'source_disconnected': return tr('上次同步解锁未执行：发起的设备已断开');
-    }
-}
 const formatSize = (b: number) => {
     const units = ['B', 'KB', 'MB', 'GB'];
     let i = 0;
@@ -73,7 +52,7 @@ const formatSize = (b: number) => {
     }
     return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
 };
-export function SettingsPage({ open, platform, api, capsIme, query, jump, onActive, version, perms, onGrant, onOpenPermissionSettings, onLog, onAbout, onBlocklist, layoutProfiles, onOnboarding, autoUnlockFixture, }: {
+export function SettingsPage({ open, platform, api, capsIme, query, jump, onActive, version, perms, onGrant, onOpenPermissionSettings, onLog, onAbout, onBlocklist, layoutProfiles, onOnboarding, autoUnlockFixture: _autoUnlockFixture, }: {
     open: boolean;
     platform: Platform;
     api: PrefsApi;
@@ -101,6 +80,8 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
     const { prefs, set } = api;
     const [logDraft,setLogDraft] = useState(prefs.logMaxMb);
     useEffect(()=>setLogDraft(prefs.logMaxMb),[prefs.logMaxMb]);
+    const [deadZoneDraft, setDeadZoneDraft] = useState(prefs.cornerDeadZonePx);
+    useEffect(() => setDeadZoneDraft(prefs.cornerDeadZonePx), [prefs.cornerDeadZonePx]);
     const agentState = useAgent();
     const { theme, setTheme, accent, setAccent, motion, setMotion } = useOink();
     const scroller = useRef<HTMLDivElement | null>(null);
@@ -180,30 +161,6 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
     },[open]);
     const received=agentState.receivedFiles;
     const [receivedSaving,setReceivedSaving]=useState(false);
-    const [autoUnlock,setAutoUnlock]=useState<AutoUnlockStatus|null>(null);
-    const autoUnlockRevision=useRef(0);
-    useEffect(()=>{
-        if(!open) return;
-        if (autoUnlockFixture) {
-            setAutoUnlock(autoUnlockFixture);
-            return;
-        }
-        let active=true;
-        const refresh=()=>{const revision=autoUnlockRevision.current;void backend.autoUnlockStatus().then(value=>{if(active && revision===autoUnlockRevision.current)setAutoUnlock(value);}).catch(()=>{if(active && revision===autoUnlockRevision.current)setAutoUnlock(null);});};
-        refresh();
-        const timer=window.setInterval(refresh,1000);
-        return ()=>{active=false;window.clearInterval(timer);};
-    },[open, autoUnlockFixture]);
-    const saveAutoUnlock=async(password:string)=>{
-        autoUnlockRevision.current++;
-        try {await backend.saveAutoUnlock(password);autoUnlockRevision.current++;setAutoUnlock(await backend.autoUnlockStatus());return null;}
-        catch (error) {return error instanceof ApiFailure && error.detail === '密码不正确' ? tr('密码不正确') : tr('无法保存登录密码');}
-    };
-    const disableAutoUnlock=async()=>{
-        autoUnlockRevision.current++;
-        try {await backend.disableAutoUnlock();autoUnlockRevision.current++;setAutoUnlock(await backend.autoUnlockStatus());}
-        catch {toast.danger({title:tr('无法更改「{0}」',tr('自动解锁本机')),description:tr('不可用')});}
-    };
     const openReceived=()=>{void backend.openReceivedFiles().catch(()=>agent.fail('unavailable'));};
     const setReceivedCleanup=async(value:ReceivedFilesCleanup)=>{
         if(receivedSaving) return;
@@ -281,17 +238,6 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
     } => {
         const sw = (k: keyof Prefs) => ({ node: <Switch aria-label={label} checked={prefs[k] as boolean} onChange={toggle(k, label)}/> });
         switch (item.id) {
-            case 'crashReports': {
-                const description = text(item.desc, platform);
-                const privacy = 'https://github.com/oinkvm/oink/blob/main/PRIVACY.md';
-                return {
-                    desc: <>{description}{' '}<a href={privacy} onClick={event => {
-                        event.preventDefault();
-                        void shell.openUrl(privacy).catch(() => agent.fail('unavailable'));
-                    }}>{tr('隐私政策')}</a></>,
-                    node: <Switch aria-label={label} checked={prefs.crashReports} onChange={toggle('crashReports', label)}/>,
-                };
-            }
             case 'launchAtLogin': {
                 // Windows: launch at login also runs Oink at the sign-in screen with this
                 // user's device identity; that machine-level part may still need approval.
@@ -308,7 +254,9 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
             case 'forwardInjectedInput':
             case 'takeForegroundOnLeave':
             case 'quickerCompat':
-            case 'syncUnlock':
+            case 'cornerDeadZoneEnabled':
+            case 'requireCtrlToWarp':
+            case 'independentMouse':
             case 'keepAwake':
             case 'pointerTrail':
             case 'keepLocalPlayback':
@@ -324,14 +272,6 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
             };
             case 'nativeMultifinger': return { node: <Switch aria-label={label} checked={prefs.nativeMultifinger} onChange={toggle('nativeMultifinger',label)} disabled={!contactsAvailable || !prefs.touchpadInject}/> };
             case 'macScrollFeel': return { node: <Switch aria-label={label} checked={prefs.macScrollFeel} onChange={toggle('macScrollFeel',label)} disabled={!contactsAvailable || !prefs.touchpadInject}/> };
-            case 'hideSponsor': return { node: <Switch aria-label={label} checked={api.presentation?.hide_sponsor ?? false} onChange={v => api.savePresentation({ hide_sponsor: v })}/> };
-            case 'autoUnlock': return {
-                desc: platform === 'win' && autoUnlock?.enabled && autoUnlock.windows_hello_only
-                    ? tr('自动解锁不可用：请在系统设置中关闭“仅允许 Windows Hello 登录”')
-                    : autoUnlock?.failure ? autoUnlockFailureText(autoUnlock.failure)
-                    : autoUnlock?.enabled && autoUnlock.sync_last ? syncUnlockSkipText(autoUnlock.sync_last.kind) : undefined,
-                node: <AutoUnlockControl platform={platform} enabled={autoUnlock?.enabled ?? false} failure={autoUnlock?.failure ?? null} windowsHelloOnly={platform === 'win' && (autoUnlock?.windows_hello_only ?? false)} label={label} onSave={saveAutoUnlock} onDisable={disableAutoUnlock}/>,
-            };
             case 'onboarding': return { node: <Button size="sm" onClick={onOnboarding}>{tr('显示')}</Button> };
             case 'uninstall': return { node: <UninstallControl/> };
             case 'blocklist':
@@ -369,10 +309,8 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
             case 'version':
                 return {
                     desc: <span className="setp__mono">v{version}</span>,
-                    node: <UpdateCheck status={agentState.update} open={open}/>,
+                    node: null,
                 };
-            case 'updates': return { desc: manualUpdates(agentState.update) ? tr('此版本需要手动下载并安装更新。') : undefined, node: <UpdatePreferences status={agentState.update} label={label}/> };
-            case 'updateChannel': return { node: <UpdateChannel status={agentState.update} label={label}/> };
             case 'about':
                 return { node: <Button size="sm" onClick={onAbout}>{tr('查看')}</Button> };
             case 'language':
@@ -471,6 +409,8 @@ export function SettingsPage({ open, platform, api, capsIme, query, jump, onActi
                                 }, meta: 'trace' },
                         ]}/>),
                 };
+            case 'cornerDeadZonePx':
+                return { node: <Input size="sm" className="setp__px" aria-label={label} inputMode="numeric" suffix="px" disabled={!prefs.cornerDeadZoneEnabled} value={deadZoneDraft} invalid={!/^\d+$/.test(deadZoneDraft) || Number(deadZoneDraft) < 0 || Number(deadZoneDraft) > 2000} onChange={v => setDeadZoneDraft(v.replace(/\D/g, '').slice(0, 4))} onBlur={() => { if (/^\d+$/.test(deadZoneDraft)) { const clamped = String(Math.min(2000, Math.max(0, Number(deadZoneDraft)))); setDeadZoneDraft(clamped); set('cornerDeadZonePx', clamped); } }}/> };
             case 'logMaxMb':
                 return { node: <Input size="sm" className="setp__mb" aria-label={label} inputMode="numeric" suffix="MB" value={logDraft} invalid={!/^\d+$/.test(logDraft) || Number(logDraft) < 1} onChange={v => setLogDraft(v.replace(/\D/g,''))} onBlur={()=>{ if(/^\d+$/.test(logDraft) && Number(logDraft) >= 1) set('logMaxMb',logDraft); }}/> };
             case 'bundle':

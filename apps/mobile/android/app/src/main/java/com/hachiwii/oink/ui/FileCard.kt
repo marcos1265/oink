@@ -123,11 +123,11 @@ internal fun FileTypeTile(folder: Boolean, glyph: IconData, grey: Boolean = fals
 internal fun FileCardText(name: String, ext: String, size: String, reason: String?, reasonBad: Boolean, modifier: Modifier = Modifier, row: Boolean = false) {
     val c = Oink.colors
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (row) T(name, 14f, c.stackCardInk, weight = 600, lineHeight = 18.9f, maxLines = 3, ellipsis = true)
-        else T(name, 12f, c.stackCardInk, weight = 600, lineHeight = 15.6f, maxLines = 3, ellipsis = true)
+        if (row) T(name, 14f, c.stackCardInk, weight = 600, lineHeight = 18.9f, maxLines = 3, ellipsis = true, raw = true)
+        else T(name, 12f, c.stackCardInk, weight = 600, lineHeight = 15.6f, maxLines = 3, ellipsis = true, raw = true)
         val second = reason ?: size
         if (ext.isNotEmpty() || second.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (ext.isNotEmpty()) T(ext, 9f, c.stackCardHint, Modifier.alignByBaseline(), weight = 650, lineHeight = 12f, letterSpacing = .4f)
+            if (ext.isNotEmpty()) T(ext, 9f, c.stackCardHint, Modifier.alignByBaseline(), weight = 650, lineHeight = 12f, letterSpacing = .4f, raw = true)
             if (second.isNotEmpty()) T(second, if (row) 11f else 10f, if (reasonBad) c.badInk else c.stackCardHint, Modifier.alignByBaseline(),
                 lineHeight = if (row) 15f else 12f, ellipsis = true, tabular = true)
         }
@@ -143,8 +143,10 @@ internal fun FileSlotButton(state: FileLook, name: String, onClick: (() -> Unit)
     val c = Oink.colors
     val slot = state.slot ?: return
     val tappable = onClick != null && (slot == FileSlot.Download || slot == FileSlot.Retry)
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val desc = com.hachiwii.oink.L10n.translate(if (slot == FileSlot.Retry) "重试下载 $name" else "下载 $name", lang)
     Box(Modifier.size(40.dp, 44.dp).then(if (tappable) Modifier.press { onClick!!() }.semantics {
-        contentDescription = if (slot == FileSlot.Retry) appText("重试下载 $name", "Retry download $name") else appText("下载 $name", "Download $name")
+        contentDescription = desc
     } else Modifier), contentAlignment = Alignment.Center) {
         when (slot) {
             FileSlot.Download -> Box(Modifier.size(32.dp).clip(CircleShape).background(OinkColors.mix(c.stackCardInk, c.stackCard, .06f)), contentAlignment = Alignment.Center) {

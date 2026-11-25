@@ -73,10 +73,12 @@ fun textStyle(size: Float, color: Color, weight: Int = 400, lineHeight: Float = 
 @Composable
 fun T(text: String, size: Float, color: Color, modifier: Modifier = Modifier, weight: Int = 400, lineHeight: Float = size * 1.4f,
       letterSpacing: Float = 0f, align: TextAlign = TextAlign.Unspecified, maxLines: Int = Int.MAX_VALUE,
-      ellipsis: Boolean = false, tabular: Boolean = false) {
+      ellipsis: Boolean = false, tabular: Boolean = false, raw: Boolean = false) {
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val rendered = if (raw) text else com.hachiwii.oink.L10n.translate(text, lang)
     // CSS may break a line after a hyphen even before a digit ("DESKTOP-" / "9AO8GPM"); ICU does not,
     // so a zero-width space after each hyphen gives Android the same break opportunity.
-    BasicText(text.replace("-", "-\u200B"), modifier, textStyle(size, color, weight, lineHeight, letterSpacing, align, tabular),
+    BasicText(rendered.replace("-", "-\u200B"), modifier, textStyle(size, color, weight, lineHeight, letterSpacing, align, tabular),
         overflow = if (ellipsis) TextOverflow.Ellipsis else TextOverflow.Clip, maxLines = if (ellipsis && maxLines == Int.MAX_VALUE) 1 else maxLines,
         softWrap = !(ellipsis && maxLines == Int.MAX_VALUE))
 }
@@ -187,11 +189,13 @@ data class ToastData(val text: String, val action: String? = null, val onAction:
 
 /** ui-kit Toast: pill at top 72 of its layer, optional action button. */
 @Composable
-fun BoxScope.TopToast(toast: ToastData?, top: Dp = 72.dp, onAction: () -> Unit = {}) {
+fun BoxScope.TopToast(toast: ToastData?, top: Dp = 72.dp, onDismiss: () -> Unit = {}, onAction: () -> Unit = {}) {
     val c = Oink.colors
     if (toast == null) return
+    val dismiss = if (toast.action == null) Modifier.press(shape = RoundedCornerShape(21.dp)) { onDismiss() } else Modifier
     Row(Modifier.align(Alignment.TopCenter).padding(top = top).widthIn(max = 361.dp)
         .boxShadow(c.shadow, 4.dp, 16.dp, 21.dp).clip(RoundedCornerShape(21.dp)).background(c.toast)
+        .then(dismiss)
         .heightIn(min = 42.dp).padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         T(toast.text, 13f, c.toastInk, Modifier.padding(end = 8.dp), lineHeight = 18.2f)
@@ -208,7 +212,7 @@ fun rememberToast(freeze: Boolean = false): MutableState<ToastData?> {
     val state = remember { mutableStateOf<ToastData?>(null) }
     val current = state.value
     LaunchedEffect(current?.id) {
-        if (current != null && !freeze) { kotlinx.coroutines.delay(if (current.action != null) 4000 else 2000); if (state.value?.id == current.id) state.value = null }
+        if (current != null && !freeze) { kotlinx.coroutines.delay(if (current.action != null) 4000 else 1400); if (state.value?.id == current.id) state.value = null }
     }
     return state
 }

@@ -64,12 +64,30 @@ pub struct Status {
 static OPERATION: Mutex<()> = Mutex::new(());
 const FAILURE_FILE: &str = "auto-unlock-failure.json";
 
+#[allow(dead_code)]
 fn error(message: &str) -> crate::api::ApiError {
     crate::api::ApiError::Unavailable {
         message: message.into(),
     }
 }
-pub(crate) fn status(dir: &Path) -> crate::api::ApiResult<Status> {
+pub(crate) fn status(_dir: &Path) -> crate::api::ApiResult<Status> {
+    Ok(Status {
+        enabled: false,
+        failure: None,
+        windows_hello_only: false,
+        sync_last: None,
+    })
+}
+pub(crate) fn save(_dir: &Path, _password: Password) -> crate::api::ApiResult<()> {
+    Err(error("自动解锁功能已禁用"))
+}
+pub(crate) fn disable(_dir: &Path) -> crate::api::ApiResult<()> {
+    Ok(())
+}
+pub(crate) fn remote_input(_source: DeviceId, _age_ms: u32) {}
+pub(crate) fn attempt(_node: &crate::node::Node, _epoch: u64, _source: DeviceId, _initial_input_age_ms: Option<u32>) {}
+#[allow(dead_code)]
+fn _disabled_orig_status(dir: &Path) -> crate::api::ApiResult<Status> {
     let _guard = OPERATION.lock().map_err(|_| error("自动解锁不可用"))?;
     let enabled = platform_status().map_err(error)?;
     let failure = platform_failure().or_else(|| {
@@ -88,7 +106,8 @@ pub(crate) fn status(dir: &Path) -> crate::api::ApiResult<Status> {
         sync_last: enabled.then(|| sync::read_last(dir)).flatten(),
     })
 }
-pub(crate) fn save(dir: &Path, password: Password) -> crate::api::ApiResult<()> {
+#[allow(dead_code)]
+fn _disabled_orig_save(dir: &Path, password: Password) -> crate::api::ApiResult<()> {
     let _guard = OPERATION.lock().map_err(|_| error("自动解锁不可用"))?;
     if password.expose().is_empty() || password.expose().len() > 4096 || password.expose().contains('\0') {
         return Err(crate::api::ApiError::InvalidArgument {
@@ -99,7 +118,8 @@ pub(crate) fn save(dir: &Path, password: Password) -> crate::api::ApiResult<()> 
     sync::clear_last(dir);
     clear_failure(dir).map_err(error)
 }
-pub(crate) fn disable(dir: &Path) -> crate::api::ApiResult<()> {
+#[allow(dead_code)]
+fn _disabled_orig_disable(dir: &Path) -> crate::api::ApiResult<()> {
     let _guard = OPERATION.lock().map_err(|_| error("自动解锁不可用"))?;
     platform_disable().map_err(error)?;
     sync::clear_last(dir);
@@ -136,15 +156,8 @@ pub(crate) fn source_unlocked(profile: crate::node::Profile, locked: Option<bool
     profile == crate::node::Profile::User && locked == Some(false)
 }
 
-pub(crate) fn remote_input(source: DeviceId, age_ms: u32) {
-    #[cfg(windows)]
-    {
-        let _ = oink_winsvc::auto_unlock_remote_input(source_tag(source), age_ms);
-    }
-    #[cfg(not(windows))]
-    let _ = (source, age_ms);
-}
-pub(crate) fn attempt(node: &crate::node::Node, epoch: u64, source: DeviceId, initial_input_age_ms: Option<u32>) {
+#[allow(dead_code)]
+fn _disabled_orig_attempt(node: &crate::node::Node, epoch: u64, source: DeviceId, initial_input_age_ms: Option<u32>) {
     if node.profile() != crate::node::Profile::User {
         return;
     }
@@ -338,7 +351,10 @@ pub(crate) fn local_unlock_edge(node: &crate::node::Node) {
 /// prechecks that need no waiting come first, so a device that is unlocked,
 /// paused or not set up is never woken. Every skip is silent; only the reasons
 /// listed in `sync::SyncSkip` are recorded.
-pub(crate) fn sync_attempt(node: &crate::node::Node, source: DeviceId, epoch: u64) {
+pub(crate) fn sync_attempt(_node: &crate::node::Node, _source: DeviceId, _epoch: u64) {}
+
+#[allow(dead_code)]
+fn _disabled_orig_sync_attempt(node: &crate::node::Node, source: DeviceId, epoch: u64) {
     use sync::{SourceAnswer, SyncSkip};
     sync::record_diagnostic(3, epoch, 0);
     if node.profile() != crate::node::Profile::User {

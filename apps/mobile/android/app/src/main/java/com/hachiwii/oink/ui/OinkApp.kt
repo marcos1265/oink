@@ -162,6 +162,7 @@ class AppActions(
     val retryConnection: () -> Unit = {},
     /** Opens the control page's session with the core; null while there is no core (design scenes). Keep it stable. */
     val control: com.hachiwii.oink.control.ControlOpener? = null,
+    val quitApp: () -> Unit = {},
 )
 
 @Composable
@@ -169,6 +170,8 @@ fun OinkApp(model: AppModel, init: UiInit, prefs: Prefs, setPrefs: (Prefs) -> Un
             notices: kotlinx.coroutines.flow.Flow<String>? = null) {
     val dark = when (prefs.scheme) { "dark" -> true; "light" -> false; else -> systemDark }
     val colors = remember(dark, prefs.accent) { OinkColors.of(dark, prefs.accent) }
+    val lang = com.hachiwii.oink.AppLang.resolve(prefs.language)
+    SideEffect { com.hachiwii.oink.L10n.setPreference(prefs.language) }
     val ui = remember(init) { UiState(init) }
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     SideEffect { ui.dismissKeyboard = { focus.clearFocus(force = true) } }
@@ -186,16 +189,27 @@ fun OinkApp(model: AppModel, init: UiInit, prefs: Prefs, setPrefs: (Prefs) -> Un
             ui.viewer = null; ui.viewerPage = null; ui.viewerFolder = null
         }
     }
+    CompositionLocalProvider(com.hachiwii.oink.LocalAppLang provides lang) {
     OinkTheme(colors) {
         val c = Oink.colors
         val toast = rememberToast(init.freeze)
         LaunchedEffect(init) { init.toast?.let { toast.value = it } }
         // Failed operations (with the core's reason) and confirmed results.
-        LaunchedEffect(notices) { notices?.collect {
-            // Each notice owns its visible interval; buffered notices follow it, never overwrite it.
-            toast.value = ToastData(it)
-            kotlinx.coroutines.delay(2000)
-        } }
+        LaunchedEffect(notices) {
+            var lastText: String? = null
+            var lastShownAtMs = 0L
+            notices?.collect {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (it == lastText && now - lastShownAtMs < 1500L) return@collect
+                lastText = it
+                lastShownAtMs = now
+                val shown = ToastData(it)
+                toast.value = shown
+                kotlinx.coroutines.withTimeoutOrNull(1400) {
+                    snapshotFlow { toast.value?.id }.first { id -> id != shown.id }
+                }
+            }
+        }
         Box(Modifier.fillMaxSize().background(c.bg)) {
             // System bars stay outside the app area; overlays below cover it edge to edge. The
             // keyboard's part of safeDrawing follows its animation through [imeLift], which the
@@ -238,9 +252,10 @@ fun OinkApp(model: AppModel, init: UiInit, prefs: Prefs, setPrefs: (Prefs) -> Un
             // Layers that raise their own zIndex (the image viewer uses 10) would otherwise
             // cover it, e.g. 已保存到相册 was hidden behind the viewer.
             Box(Modifier.fillMaxSize().zIndex(100f).windowInsetsPadding(WindowInsets.safeDrawing)) {
-                TopToast(toast.value, onAction = { val t = toast.value; toast.value = null; t?.onAction?.invoke() })
+                TopToast(toast.value, onDismiss = { toast.value = null }, onAction = { val t = toast.value; toast.value = null; t?.onAction?.invoke() })
             }
         }
+    }
     }
 }
 
@@ -329,14 +344,14 @@ private fun AppBase(model: AppModel, init: UiInit, ui: UiState, actions: AppActi
             Modifier.align(Alignment.BottomStart).offset { IntOffset(groupLeft.roundToPx(), lift.px()) }.width(w)
         }
         TabBar(ui, content, rootPos, side, barModifier
-            .then(if ((!side && covered) || barGone) Modifier.clearAndSetSemantics {} else Modifier)
+            .then(if ((!side && covered) || barGone) NoSemantics else Modifier)
             .graphicsLayer {
                 if (side) translationX = gone * (size.width + 24.dp.toPx())
                 else translationY = maxOf(away, gone) * (size.height + 24.dp.toPx())
                 alpha = 1f - maxOf(away, gone)
             })
         if (aside > 0f) KeyboardFab(content, rootPos, Modifier.align(Alignment.BottomStart).offset { IntOffset((groupLeft + fullBarWidth - KEYBOARD_FAB).roundToPx(), lift.px()) }
-            .then(if (covered || away > 0f) Modifier.clearAndSetSemantics {} else Modifier)
+            .then(if (covered || away > 0f) NoSemantics else Modifier)
             .graphicsLayer {
                 val s = .6f + .4f * aside
                 scaleX = s; scaleY = s
@@ -376,9 +391,10 @@ private val KEYBOARD_FAB = 68.dp
 private fun KeyboardFab(content: GraphicsLayer, origin: Offset, modifier: Modifier, onClick: () -> Unit) {
     val c = Oink.colors
     val haptic = rememberHaptics()
+    val desc = com.hachiwii.oink.L10n.translate("弹出键盘", com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.padding(bottom = 10.dp).size(KEYBOARD_FAB).frosted(content, origin, KEYBOARD_FAB / 2)
         .clip(CircleShape).press(pressedColor = c.press) { haptic(false); onClick() }
-        .semantics { contentDescription = "弹出键盘" }, contentAlignment = Alignment.Center) {
+        .semantics { contentDescription = desc }, contentAlignment = Alignment.Center) {
         SvgIcon(DesignIconData.pcKeyboard, 26.dp, tint = c.ink, stroke = 1.4f)
     }
 }
@@ -392,15 +408,17 @@ private fun KeyboardFab(content: GraphicsLayer, origin: Offset, modifier: Modifi
 internal fun HeaderTabs(ui: UiState) {
     val c = Oink.colors
     val haptic = rememberHaptics()
+    val lang = com.hachiwii.oink.LocalAppLang.current
     // A hidden landscape top bar takes no touches (they go to the pad under it).
     val live = LocalBarLive.current
     Row(Modifier.height(48.dp).headerSurface(c, 24.dp).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
         Tab.entries.forEach { t ->
             val active = !ui.addPage && ui.tab == t
             val color = if (active) c.accentInk else c.text2
+            val tabDesc = com.hachiwii.oink.L10n.translate(t.label, lang)
             Row(Modifier.height(38.dp).clip(RoundedCornerShape(19.dp)).background(if (active) c.chip else Color.Transparent)
                 .then(if (live) Modifier.press(role = androidx.compose.ui.semantics.Role.Tab) { haptic(false); ui.tab = t; ui.addPage = false } else Modifier)
-                .semantics { contentDescription = t.label }.padding(start = 12.dp, end = 14.dp),
+                .semantics { contentDescription = tabDesc }.padding(start = 12.dp, end = 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 val stroke = if (active) 2.2f else 1.8f
                 when (t) {
@@ -430,6 +448,8 @@ internal val TAB_BAR_SPACE = (68 + 10 + 8 - 6).dp
  * slide ends, are in the semantics tree (none while [covered]: the add-device page is over them);
  * both changes happen at the ends of the slide, not during it.
  */
+private val NoSemantics = Modifier.clearAndSetSemantics {}
+
 @Composable
 private fun TabTrack(tab: Tab, covered: Boolean, panel: @Composable (Tab) -> Unit) {
     val index = animateFloatAsState(tab.ordinal.toFloat(), tween(320, easing = EaseOutExpo), label = "track")
@@ -443,7 +463,7 @@ private fun TabTrack(tab: Tab, covered: Boolean, panel: @Composable (Tab) -> Uni
         Tab.entries.forEach { t ->
             key(t) {
                 Box(Modifier.fillMaxSize().graphicsLayer { translationX = (t.ordinal - index.value) * size.width }
-                    .then(if (t in shown && !covered) Modifier else Modifier.clearAndSetSemantics {})) { panel(t) }
+                    .then(if (t in shown && !covered) Modifier else NoSemantics)) { panel(t) }
             }
         }
     }
@@ -486,13 +506,14 @@ private fun TopBar(model: AppModel, ui: UiState, actions: AppActions) {
 @Composable
 fun IconButton48(modifier: Modifier, label: String, size: androidx.compose.ui.unit.Dp = 48.dp, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable BoxScope.() -> Unit) {
     val c = Oink.colors
+    val desc = com.hachiwii.oink.L10n.translate(label, com.hachiwii.oink.LocalAppLang.current)
     val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val input = if (onLongClick == null) Modifier.press(shape = RoundedCornerShape(16.dp), pressedColor = c.chip, onClick = onClick)
         else Modifier.clip(RoundedCornerShape(16.dp)).background(if (pressed) c.chip else Color.Transparent)
             .combinedClickable(interactionSource = source, indication = null, onClick = onClick,
                 onLongClick = onLongClick, hapticFeedbackEnabled = false)
-    Box(modifier.size(size).then(input).semantics { contentDescription = label },
+    Box(modifier.size(size).then(input).semantics { contentDescription = desc },
         contentAlignment = Alignment.Center, content = content)
 }
 
@@ -552,11 +573,13 @@ private fun TabBar(ui: UiState, content: GraphicsLayer, origin: Offset, vertical
             val w = if (vertical) maxWidth else (maxWidth - 8.dp) / 3
             val h = if (vertical) (maxHeight - 8.dp) / 3 else maxHeight
             Box(Modifier.offset(x = if (vertical) 0.dp else (w + 4.dp) * index, y = if (vertical) (h + 4.dp) * index else 0.dp).size(w, h).alpha(pillAlpha).clip(RoundedCornerShape(29.dp)).background(c.chip))
+            val lang = com.hachiwii.oink.LocalAppLang.current
             val buttons: @Composable (Modifier) -> Unit = { cell -> Tab.entries.forEach { t ->
                     val active = !ui.addPage && ui.tab == t
                     val color = if (active) c.accentInk else c.text2
+                    val tabDesc = com.hachiwii.oink.L10n.translate(t.label, lang)
                     Column(cell.clip(RoundedCornerShape(29.dp)).press(role = androidx.compose.ui.semantics.Role.Tab) { if (ui.tab == Tab.Control) haptic(false); ui.tab = t; ui.addPage = false }
-                        .semantics { contentDescription = t.label },
+                        .semantics { contentDescription = tabDesc },
                         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically)) {
                         Box(Modifier.size(48.dp, 28.dp), contentAlignment = Alignment.Center) {
                             val stroke = if (active) 2.2f else 1.8f
@@ -656,12 +679,14 @@ private fun DeviceGroup(title: String, peers: List<PeerUi>, open: (PeerUi) -> Un
 @Composable
 private fun DeviceRow(peer: PeerUi, onClick: () -> Unit) {
     val c = Oink.colors
+    val lang = com.hachiwii.oink.LocalAppLang.current
+    val rowDesc = com.hachiwii.oink.L10n.translate("打开 ${peer.name} 设备控制", lang)
     Row(Modifier.fillMaxWidth().heightIn(min = 100.dp).press { onClick() }.padding(horizontal = 16.dp, vertical = 18.dp)
-        .semantics { contentDescription = "打开 ${peer.name} 设备控制" }, verticalAlignment = Alignment.CenterVertically) {
+        .semantics { contentDescription = rowDesc }, verticalAlignment = Alignment.CenterVertically) {
         PlatformIcon(peer.platform, faint = peer.offline, modifier = Modifier.offset(x = (-8).dp), privileged = peer.privileged)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            T(peer.name, 18f, if (peer.offline) c.text2 else c.ink, weight = 650, lineHeight = 25.2f, letterSpacing = -.2f)
+            T(peer.name, 18f, if (peer.offline) c.text2 else c.ink, weight = 650, lineHeight = 25.2f, letterSpacing = -.2f, raw = true)
             if (peer.offline) {
                 Spacer(Modifier.height(8.dp))
                 T(if (peer.incompatible) "版本过低，请升级" else "上次在线 · ${peer.lastSeen}前", 13f, c.muted, lineHeight = 18.2f)
@@ -712,6 +737,7 @@ fun indicator(index: Int, state: String): Pair<Color, Badge?> {
 
 @Composable
 private fun Capabilities(peer: PeerUi) {
+    val lang = com.hachiwii.oink.LocalAppLang.current
     val labels = listOf("鼠标", "键盘", "音频", "麦克风")
     val states = listOf(peer.mouse, peer.keyboard, peer.speaker, peer.mic)
     Row(horizontalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -719,7 +745,8 @@ private fun Capabilities(peer: PeerUi) {
             if (peer.mobile && i < 2) return@forEachIndexed
             val (tint, badge) = indicator(i, state)
             val glyph = when (i) { 0 -> DesignIconData.pcMouse; 1 -> DesignIconData.pcKeyboard; 2 -> speakerGlyph(3); else -> DesignIconData.pcMicrophone }
-            DevIcon(glyph, 18.dp, tint, badge, badgeTint = badgeTintFor(badge, tint), modifier = Modifier.semantics { contentDescription = "${labels[i]}：${if (state == "forward") "转发" else state}" })
+            val desc = com.hachiwii.oink.L10n.translate("${labels[i]}：${if (state == "forward") "转发" else state}", lang)
+            DevIcon(glyph, 18.dp, tint, badge, badgeTint = badgeTintFor(badge, tint), modifier = Modifier.semantics { contentDescription = desc })
         }
     }
 }
@@ -727,7 +754,8 @@ private fun Capabilities(peer: PeerUi) {
 @Composable
 private fun Latency(ms: Double) {
     val c = Oink.colors
-    Row(Modifier.semantics { contentDescription = "延迟 ${ms.toInt()} 毫秒" }, verticalAlignment = Alignment.CenterVertically) {
+    val desc = com.hachiwii.oink.L10n.translate("延迟 ${ms.toInt()} 毫秒", com.hachiwii.oink.LocalAppLang.current)
+    Row(Modifier.semantics { contentDescription = desc }, verticalAlignment = Alignment.CenterVertically) {
         SignalBars(ms, 20.dp, 18.6.dp)
         Spacer(Modifier.width(2.dp))
         // Value: 3ch wide, right aligned, pulled 8 px towards the bars.
@@ -739,7 +767,7 @@ private fun Latency(ms: Double) {
 
 /** Screen-reader name of the crowned Android badge (native-rewrite.md: 「Android，特权模式已开启」). */
 val PRIVILEGED_ANDROID_LABEL: String
-    get() = if (java.util.Locale.getDefault().language == "zh") "Android，特权模式已开启" else "Android, privileged mode on"
+    get() = com.hachiwii.oink.L10n.translate("Android，特权模式已开启")
 
 /**
  * Platform logo in the 32 × 36 slot (MobileApp.jsx PlatformIcon + pc-icons.css placement).
@@ -753,7 +781,8 @@ fun PlatformIcon(platform: String, modifier: Modifier = Modifier, faint: Boolean
     val tint = tintOverride ?: if (faint) c.faint else when (platform) { "windows" -> c.osWindows; "android" -> c.osAndroid; else -> c.ink }
     val cut = LocalCutout.current
     val crowned = platform == "android" && privileged
-    Box(modifier.size(32.dp * scale, 36.dp * scale).then(if (crowned) Modifier.semantics { contentDescription = PRIVILEGED_ANDROID_LABEL } else Modifier),
+    val privDesc = com.hachiwii.oink.L10n.translate("Android，特权模式已开启", com.hachiwii.oink.LocalAppLang.current)
+    Box(modifier.size(32.dp * scale, 36.dp * scale).then(if (crowned) Modifier.semantics { contentDescription = privDesc } else Modifier),
         contentAlignment = Alignment.Center) {
         when (platform) {
             "windows" -> SvgIcon(DesignIconData.osWin, 24.dp * scale, tint = tint)

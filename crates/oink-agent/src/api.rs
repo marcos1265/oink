@@ -1129,6 +1129,18 @@ pub struct InputSettings {
     /// Windows device-local Quicker compatibility mode, default off. Never replicated.
     #[serde(default)]
     pub quicker_compat: bool,
+    /// Block cross-device edge warping within `corner_dead_zone_px` of display corners.
+    #[serde(default)]
+    pub corner_dead_zone_enabled: bool,
+    /// Corner dead zone size in native pixels (default 50).
+    #[serde(default = "default_corner_dead_zone_px")]
+    pub corner_dead_zone_px: u32,
+    /// Require holding Ctrl while moving off a screen edge to warp to another device.
+    #[serde(default)]
+    pub require_ctrl_to_warp: bool,
+    /// Independent cursor / Sunshine+Moonlight compatibility mode.
+    #[serde(default)]
+    pub independent_mouse: bool,
     /// Physical source preference, persisted only by this device.
     #[serde(default = "default_true")]
     pub forward_wheel_by_lines: bool,
@@ -1178,6 +1190,10 @@ fn default_return_pointer_on_display_sleep() -> bool {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_corner_dead_zone_px() -> u32 {
+    50
 }
 
 // ───────────────── 剪贴板设置（net：剪贴板同步；core 保存） ─────────────────
@@ -3335,6 +3351,10 @@ fn test_input_settings() -> InputSettings {
         forward_injected_input: true,
         take_foreground_on_leave: false,
         quicker_compat: false,
+        corner_dead_zone_enabled: false,
+        corner_dead_zone_px: 50,
+        require_ctrl_to_warp: false,
+        independent_mouse: false,
         forward_wheel_by_lines: true,
         sync_unlock_others: false,
         emergency_hold_ms: 5000,

@@ -78,33 +78,18 @@ fn unregister_step(step: u32) -> &'static str {
     }
 }
 pub(super) fn start() -> io::Result<()> {
-    register()?;
-    // SAFETY: function pointer remains live throughout the native worker.
-    result(unsafe { oink_unlock_start(authenticate) })
+    Ok(())
 }
-pub(super) fn stop() {
-    // SAFETY: no Rust-owned memory crosses the call; the native side owns its worker.
-    unsafe { oink_unlock_stop() };
-}
-pub(super) fn session_event(kind: u32, session: u32) {
-    // SAFETY: scalar notification values cross the ABI; the native side owns its state.
-    let own = unsafe { oink_unlock_session(kind, session) };
-    if own {
-        tracing::info!(session, "auto unlock own event suppressed");
-    }
-}
+pub(super) fn stop() {}
+pub(super) fn session_event(_kind: u32, _session: u32) {}
+pub(super) fn queue_event(_kind: u32, _session: u32) {}
+pub(super) fn drain_events() {}
 
-static EVENTS: std::sync::LazyLock<crossbeam_queue::ArrayQueue<(u32, u32)>> =
-    std::sync::LazyLock::new(|| crossbeam_queue::ArrayQueue::new(64));
-pub(super) fn queue_event(kind: u32, session: u32) {
-    let _ = EVENTS.push((kind, session));
-    // SAFETY: native event is process-lived; this callback only signals it.
-    unsafe { oink_unlock_wake() };
-}
-pub(super) fn drain_events() {
-    while let Some((kind, session)) = EVENTS.pop() {
-        session_event(kind, session);
-    }
+#[allow(dead_code)]
+fn _unused_unlock_hooks() {
+    let _ = (authenticate as usize, register as usize);
+    // SAFETY: keep declarations referenced without activating provider.
+    let _ = (oink_unlock_start as usize, oink_unlock_stop as usize, oink_unlock_wake as usize, oink_unlock_session as usize);
 }
 
 #[cfg(test)]

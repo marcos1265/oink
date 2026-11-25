@@ -116,6 +116,14 @@ pub struct RoutingSettings {
     /// Windows device-local Quicker compatibility mode (default off): remote
     /// mouse button injection carries dwExtraInfo 0. Never published to peers.
     pub quicker_compat: bool,
+    /// Block cross-device edge warping within `corner_dead_zone_px` of display corners.
+    pub corner_dead_zone_enabled: bool,
+    /// Corner dead zone size in native pixels/points (default 50).
+    pub corner_dead_zone_px: u32,
+    /// Require holding Ctrl (`LEFT_CTRL` or `RIGHT_CTRL`) to warp to another device.
+    pub require_ctrl_to_warp: bool,
+    /// Keep local cursor independent (bypass hiding/capturing injected input such as Sunshine/Moonlight).
+    pub independent_mouse: bool,
     /// Runtime projection of this device owner's persistent game preference.
     #[serde(skip)]
     pub game_mode_preference: crate::GameMode,
@@ -166,6 +174,10 @@ impl Default for RoutingSettings {
             forward_injected_input: true,
             take_foreground_on_leave: false,
             quicker_compat: false,
+            corner_dead_zone_enabled: false,
+            corner_dead_zone_px: 50,
+            require_ctrl_to_warp: false,
+            independent_mouse: false,
             game_mode_preference: crate::GameMode::Auto,
             return_pointer_on_display_sleep: true,
             wake_displays_on_input: true,
@@ -244,5 +256,22 @@ mod tests {
         assert!(!absent.quicker_compat);
         let explicit: RoutingSettings = serde_json::from_str(r#"{"quicker_compat":true}"#).unwrap();
         assert!(explicit.quicker_compat);
+    }
+
+    #[test]
+    fn mouse_tweaks_defaults_and_deserialization() {
+        let d = RoutingSettings::default();
+        assert!(!d.corner_dead_zone_enabled);
+        assert_eq!(d.corner_dead_zone_px, 50);
+        assert!(!d.require_ctrl_to_warp);
+        assert!(!d.independent_mouse);
+        let parsed: RoutingSettings = serde_json::from_str(
+            r#"{"corner_dead_zone_enabled":true,"corner_dead_zone_px":80,"require_ctrl_to_warp":true,"independent_mouse":true}"#,
+        )
+        .unwrap();
+        assert!(parsed.corner_dead_zone_enabled);
+        assert_eq!(parsed.corner_dead_zone_px, 80);
+        assert!(parsed.require_ctrl_to_warp);
+        assert!(parsed.independent_mouse);
     }
 }

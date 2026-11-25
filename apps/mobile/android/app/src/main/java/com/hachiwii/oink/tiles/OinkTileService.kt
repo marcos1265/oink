@@ -6,9 +6,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.service.quicksettings.TileService
 import androidx.core.content.ContextCompat
+import com.hachiwii.oink.AppLang
 import com.hachiwii.oink.ConnectionService
 import com.hachiwii.oink.AUDIO_MICROPHONE
 import com.hachiwii.oink.CopyOutcome
+import com.hachiwii.oink.L10n
 import com.hachiwii.oink.LaunchRequest
 import com.hachiwii.oink.OinkApplication
 import com.hachiwii.oink.mainLaunchIntent
@@ -37,11 +39,12 @@ abstract class OinkTileService(private val kind: TileKind) : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
+        L10n.sync(this)
         listening?.cancel()
         listening = scope.launch {
-            combine(repository.state, TileFeedback.texts) { state, feedback ->
-                tileLook(kind, tileFacts(state, ConnectionService.inForeground, microphonePermission()), feedback[kind])
-            }.distinctUntilChanged().collect { render(it) }
+            combine(repository.state, TileFeedback.texts, L10n.langFlow) { state, feedback, lang ->
+                tileLook(kind, tileFacts(state, ConnectionService.inForeground, microphonePermission()), feedback[kind]) to lang
+            }.distinctUntilChanged().collect { (look, lang) -> render(look, lang) }
         }
     }
 
@@ -56,11 +59,11 @@ abstract class OinkTileService(private val kind: TileKind) : TileService() {
         super.onDestroy()
     }
 
-    private fun render(look: TileLook) {
+    private fun render(look: TileLook, lang: AppLang = L10n.current) {
         val tile = qsTile ?: return
-        tile.label = kind.label
+        tile.label = L10n.translate(kind.label, lang)
         tile.state = look.state
-        tile.subtitle = look.subtitle
+        tile.subtitle = look.subtitle?.let { L10n.translate(it, lang) }
         tile.updateTile()
     }
 

@@ -158,6 +158,8 @@ fun ShareCardLayer(s: ShareCardUi, host: Boolean = s.freezeT != null, onHide: ((
             }
         }
         Box(Modifier.fillMaxSize().background(c.shareScrim))
+        val sendDesc = com.hachiwii.oink.L10n.translate("Oink 正在发送", com.hachiwii.oink.LocalAppLang.current)
+        val waitText = com.hachiwii.oink.L10n.translate("对方不在线，请在对方设备打开 Oink\n并确保网络连接畅通", com.hachiwii.oink.LocalAppLang.current)
         Column(Modifier.align(Alignment.Center).windowInsetsPadding(WindowInsets.safeDrawing).padding(horizontal = 24.dp).widthIn(max = 272.dp).fillMaxWidth()
             .graphicsLayer { translationY = drag.value }
             .then(if (canHide) Modifier.pointerInput(Unit) {
@@ -169,12 +171,12 @@ fun ShareCardLayer(s: ShareCardUi, host: Boolean = s.freezeT != null, onHide: ((
             .clip(RoundedCornerShape(20.dp)).background(c.shareSurface).border(1.dp, c.shareBorder, RoundedCornerShape(20.dp))
             // 226 (waiting) ↔ 224 (sending) in 200 ms (SPEC §5.9); no transition with reduced motion.
             .then(if (reduceMotion || frozen) Modifier else Modifier.animateContentSize(tween(200, easing = ShareAnim.easeStandard)))
-            .padding(horizontal = 16.dp, vertical = 20.dp).semantics { contentDescription = "Oink 正在发送" }, horizontalAlignment = Alignment.CenterHorizontally) {
+            .padding(horizontal = 16.dp, vertical = 20.dp).semantics { contentDescription = sendDesc }, horizontalAlignment = Alignment.CenterHorizontally) {
             Stage(stage, target, done)
             // The waiting text and the status line cross-fade in 150 ms (SPEC §5.9).
             Crossfade(waiting, Modifier.padding(top = 12.dp).fillMaxWidth(),
                 animationSpec = if (reduceMotion || frozen) snap() else tween(150, easing = LinearEasing), label = "share-text") { wait ->
-                if (wait) BasicText(ShareStatusText.waitingForTarget(),
+                if (wait) BasicText(waitText,
                     Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
                     // Chinese breaks after 「Oink」 by its own newline; English balances its two lines.
                     style = textStyle(13f, c.shareText, lineHeight = 20f, align = TextAlign.Center).copy(lineBreak = LineBreak.Paragraph))
@@ -270,5 +272,9 @@ private fun Stage(f: StageFrame, target: ShareTarget, done: Boolean) {
 @Composable
 fun ShareOnly(card: ShareCardUi, prefs: Prefs, systemDark: Boolean, onHide: (() -> Unit)? = null, onCancel: (() -> Unit)? = null) {
     val dark = when (prefs.scheme) { "dark" -> true; "light" -> false; else -> systemDark }
-    OinkTheme(remember(dark, prefs.accent) { OinkColors.of(dark, prefs.accent) }) { ShareCardLayer(card, host = false, onHide = onHide, onCancel = onCancel) }
+    val lang = com.hachiwii.oink.AppLang.resolve(prefs.language)
+    SideEffect { com.hachiwii.oink.L10n.setPreference(prefs.language) }
+    CompositionLocalProvider(com.hachiwii.oink.LocalAppLang provides lang) {
+        OinkTheme(remember(dark, prefs.accent) { OinkColors.of(dark, prefs.accent) }) { ShareCardLayer(card, host = false, onHide = onHide, onCancel = onCancel) }
+    }
 }

@@ -2,7 +2,7 @@
 import {afterEach,beforeAll,expect,it,vi} from 'vitest';
 import {cleanup,fireEvent,render,screen,waitFor,within} from '@testing-library/react';
 import {OinkProvider,toast} from 'oink-ui';
-import {api,shell} from '../api/client';
+import {api} from '../api/client';
 import {agent} from '../api/store';
 import {setLanguage,tr} from '../i18n';
 import type {MicrophonePluginStatus} from '../api/types';
@@ -21,28 +21,25 @@ it.each([[false,false],[false,true],[true,false],[true,true]])('only explicitly 
  fireEvent.click(button);
  await waitFor(()=>expect(action).toHaveBeenCalledWith(installed?'uninstall':'install'));
 });
-it('keeps an unmanaged Windows copy disabled and links vendor terms',async()=>{
+it('keeps an unmanaged Windows copy disabled without rendering external links',async()=>{
  setLanguage('en');
  vi.spyOn(api,'microphonePluginStatus').mockResolvedValue(status(true,false));
  const action=vi.spyOn(api,'microphonePluginAction');
- const open=vi.spyOn(shell,'openUrl').mockResolvedValue(undefined);
  render(<OinkProvider><VirtualMicrophoneDescription windows/><VirtualMicrophone windows active/></OinkProvider>);
  const button=await screen.findByRole('button',{name:'Uninstall'});
  expect(button.hasAttribute('disabled')).toBe(true);
  fireEvent.click(button);
  expect(action).not.toHaveBeenCalled();
- fireEvent.click(screen.getByRole('link',{name:'official website'}));
- expect(open).toHaveBeenCalledWith('https://www.vb-cable.com');
+ expect(screen.queryByRole('link')).toBeNull();
 });
 
-it.each(['zh-Hans','en','ja','ko'] as const)('keeps vendor licensing in one secondary sentence in %s', language=>{
+it.each(['zh-Hans','en','ja','ko'] as const)('keeps vendor note offline in %s', language=>{
  setLanguage(language);
  render(<VirtualMicrophoneDescription windows/>);
- const link=screen.getByRole('link');
- expect(link.getAttribute('href')).toBe('https://www.vb-cable.com');
- expect(link.parentElement?.className).toBe('setp__microphone-description');
+ expect(screen.queryByRole('link')).toBeNull();
  expect(screen.queryByRole('button')).toBeNull();
- if(language==='zh-Hans')expect(link.parentElement?.textContent).toBe('使用 VB-CABLE：访问官网查看许可证条款和捐赠');
+ const desc = document.querySelector('.setp__microphone-description');
+ expect(desc?.textContent).toContain('CABLE Output');
 });
 it.each(['unsupported','not_installed'] as const)('respects supported installation state %s',async state=>{
  setLanguage('en');

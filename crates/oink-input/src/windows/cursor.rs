@@ -10,7 +10,7 @@
 use oink_foundation::snapshot::Snapshot;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -24,10 +24,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorInfo,
     GetCursorPos, GetMessageW, HCURSOR, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, LWA_ALPHA, LoadCursorW,
-    MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_SETCURSORS, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetLayeredWindowAttributes, SetWindowPos,
-    ShowWindow, SystemParametersInfoW, WM_APP, WM_CLOSE, WM_DESTROY, WM_MOUSEACTIVATE, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SPI_SETCURSORS,
+    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_MOUSEACTIVATE, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 #[cfg(debug_assertions)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -42,6 +43,8 @@ use super::dpi::ThreadDpiGuard;
 /// 遮罩窗口边长（物理像素）。
 const COVER: i32 = 128;
 const WM_COVER_APPLY: u32 = WM_APP + 1;
+const WM_DWMCOMPOSITIONCHANGED: u32 = 0x031E;
+static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug)]
 struct CoverRequest {
@@ -55,6 +58,7 @@ struct CoverRequest {
 thread_local! {
     static COVER_REQUEST: RefCell<Option<Arc<Snapshot<Option<CoverRequest>>>>> = const { RefCell::new(None) };
     static COVER_APPLIED: Cell<Option<CoverRequest>> = const { Cell::new(None) };
+    static COVER_REPLY: Cell<usize> = const { Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +293,35 @@ fn acknowledge_cover(hwnd: HWND, r: CoverRequest) -> bool {
     ready
 }
 
+fn handle_cover_environment_reset(hwnd: HWND, shell_restarted: bool) {
+    if cover_request().is_none_or(|r| !r.visible) {
+        // SAFETY: own window; never let a display/DWM/shell reset leave a hidden cover visible.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    } else {
+        // SAFETY: own layered window; refresh alpha after DWM/driver reset.
+        unsafe {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA);
+        }
+    }
+    let reply = cover_request()
+        .map(|r| r.reply)
+        .filter(|&r| r != 0)
+        .unwrap_or_else(|| COVER_REPLY.with(Cell::get));
+    if reply != 0 {
+        // SAFETY: asynchronous notification to the hook owner's HWND.
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(reply as *mut _)),
+                super::hook::WM_APP_SHELL_RESET,
+                WPARAM(usize::from(shell_restarted)),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
 unsafe extern "system" fn cover_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COVER_APPLY => {
@@ -388,6 +421,10 @@ unsafe extern "system" fn cover_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
+        WM_DISPLAYCHANGE | WM_DWMCOMPOSITIONCHANGED => {
+            handle_cover_environment_reset(hwnd, false);
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_CLOSE => {
             // SAFETY: this thread owns the window.
@@ -403,8 +440,16 @@ unsafe extern "system" fn cover_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             LRESULT(0)
         }
-        // SAFETY: unhandled window messages use the standard procedure.
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        other => {
+            let taskbar = TASKBAR_CREATED_MSG.load(Ordering::Relaxed);
+            if taskbar != 0 && other == taskbar {
+                handle_cover_environment_reset(hwnd, true);
+                LRESULT(0)
+            } else {
+                // SAFETY: unhandled window messages use the standard procedure.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
     }
 }
 
@@ -436,7 +481,12 @@ impl Cover {
 
 impl Hider {
     /// 在输入线程上创建（`window` 方案会启动遮罩窗口的专用线程，窗口先隐藏）。
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn new(strategy: Strategy) -> Self {
+        Self::new_with_reply(strategy, HWND::default())
+    }
+
+    pub(crate) fn new_with_reply(strategy: Strategy, reply: HWND) -> Self {
         let mut h = Self {
             strategy,
             cover: None,
@@ -446,10 +496,10 @@ impl Hider {
             covered: None,
             pending_park: None,
             generation: 0,
-            reply: HWND::default(),
+            reply,
         };
         if strategy == Strategy::Window {
-            h.cover = spawn_cover();
+            h.cover = spawn_cover(reply);
             if h.cover.is_none() {
                 tracing::warn!("创建光标遮罩窗口失败，Remote 模式下光标将可见");
             }
@@ -560,6 +610,21 @@ impl Hider {
         self.pending_park.map(|request| request.generation)
     }
 
+    pub(crate) fn pending_park_target(&self) -> Option<POINT> {
+        self.pending_park.map(|request| request.park)
+    }
+
+    pub(crate) fn is_cover_visible(&self) -> bool {
+        #[cfg(all(test, debug_assertions))]
+        if test_native::active() {
+            return false;
+        }
+        self.cover.as_ref().is_some_and(|cover| {
+            // SAFETY: read-only visibility query on our own cover window.
+            unsafe { IsWindowVisible(cover.hwnd).as_bool() }
+        })
+    }
+
     pub(crate) fn cancel_park(&mut self) {
         self.pending_park = None;
     }
@@ -616,7 +681,7 @@ impl Hider {
     fn show_at_kind(&mut self, at: Option<POINT>, safe_visibility: bool) {
         super::trace::action(crate::native_lifecycle::Kind::Show, at, 0, None);
         self.cancel_park();
-        if !self.hidden && !(safe_visibility && self.show_pending) {
+        if !self.hidden && !(safe_visibility && self.show_pending) && !self.is_cover_visible() {
             return;
         }
         self.generation += 1;
@@ -730,15 +795,17 @@ fn nudge(p: POINT) {
 }
 
 /// 启动遮罩线程：创建（隐藏的）遮罩窗口，一直取消息，收到 `WM_CLOSE` 时销毁窗口并退出。
-fn spawn_cover() -> Option<Cover> {
+fn spawn_cover(reply: HWND) -> Option<Cover> {
     let (tx, rx) = mpsc::channel::<Option<isize>>();
     let request = Arc::new(Snapshot::new(None));
     let requested = request.clone();
+    let reply_ptr = reply.0 as usize;
     let thread = std::thread::Builder::new()
         .name("oink-cursor-cover".into())
         .spawn(move || {
             let _dpi = ThreadDpiGuard::per_monitor_v2();
             COVER_REQUEST.with(|slot| *slot.borrow_mut() = Some(requested));
+            COVER_REPLY.with(|slot| slot.set(reply_ptr));
             let Some(hwnd) = create_cover() else {
                 let _ = tx.send(None);
                 return;
@@ -796,6 +863,10 @@ fn create_cover() -> Option<HWND> {
         .ok()?;
         // alpha = 1：肉眼不可见，但仍参与命中测试（alpha = 0 的分层窗口不接收鼠标）
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA);
+        let taskbar = RegisterWindowMessageW(w!("TaskbarCreated"));
+        if taskbar != 0 {
+            TASKBAR_CREATED_MSG.store(taskbar, Ordering::Relaxed);
+        }
         Some(hwnd)
     }
 }

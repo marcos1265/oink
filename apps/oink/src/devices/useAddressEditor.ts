@@ -20,7 +20,7 @@ export function useAddressEditor() {
       if (generation.current !== current) return;
       setAddresses(stored);
       const address = stored.find(a => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(a));
-      if (address) {
+      if (address && !target.ip) {
         const [ip, port] = address.split(':');
         setDevice({...target, ip, port: Number(port)});
       }

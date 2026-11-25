@@ -55,7 +55,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Online updates: signed v2 catalogs and DMGs over HTTPS.
-oink-update = { path = "../oink-update", features = ["http"] }
+oink-update = { path = "../oink-update" }
 notify = "8"
 objc2 = "0.6"
 objc2-foundation = "0.3"

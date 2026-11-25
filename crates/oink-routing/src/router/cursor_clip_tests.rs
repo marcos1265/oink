@@ -849,3 +849,16 @@ fn remote_keyboard_release_invalidates_local_mouse_game_readback() {
     assert!(!r.game_escape_readback(B));
     assert!(r.game.escape_cursor.is_none());
 }
+
+#[test]
+fn set_system_cursor_clip_clamps_virtual_pointer_without_injecting_absolute_move() {
+    let mut r = target(false);
+    r.set_system_cursor_clip(Some(clip()));
+    assert_eq!(r.local_pointer(), Some(Point::new(500., 399.)));
+    assert!(
+        !r.drain_outputs()
+            .into_iter()
+            .any(|o| matches!(o, Output::Inject(_))),
+        "clamping virtual pointer to OS ClipCursor must not inject synthetic absolute moves"
+    );
+}

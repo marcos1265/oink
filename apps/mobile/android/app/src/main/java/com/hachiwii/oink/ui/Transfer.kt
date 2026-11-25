@@ -28,6 +28,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -260,23 +261,86 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
     BackHandler(enabled = menu != null) { menu = null }
     // The message menu's popup does not take window focus (see MessageMenu), so back reaches the page.
     BackHandler(enabled = messageMenu != null) { messageMenu = null }
-    val list = rememberLazyListState()
     val rows = remember(model.messages, expanded) { transferRows(model.messages, expanded) }
+    var focus by remember(init) { mutableStateOf(init.transferFocus) }
+    val initialIndex = remember(init) {
+        val hit = init.transferFocus?.let { id ->
+            rows.indexOfFirst { row -> row is SingleRow && row.message.id == id || row is StackRow && row.items.any { it.id == id } }
+        }?.takeIf { it >= 0 }
+        when {
+            hit != null -> hit + 1
+            rows.isNotEmpty() -> rows.size
+            else -> 0
+        }
+    }
+    val list = rememberLazyListState(initialFirstVisibleItemIndex = initialIndex)
+    var initialized by remember(init) {
+        mutableStateOf(rows.isNotEmpty() && (init.transferFocus == null || initialIndex != rows.size))
+    }
+    var prevRows by remember(init) { mutableStateOf(rows) }
+    var lastNewest by remember(init) { mutableStateOf(model.messages.lastOrNull()?.id) }
+    var lastFirstIndex by remember(init) { mutableStateOf(initialIndex) }
+    var lastAnchor by remember(init) { mutableStateOf<Pair<Any, Int>?>(null) }
+    var lastNearBottom by remember(init) { mutableStateOf(true) }
+    LaunchedEffect(list) {
+        snapshotFlow {
+            val info = list.layoutInfo
+            val anchor = info.visibleItemsInfo.firstOrNull { it.key != "top" }?.let { it.key to it.offset }
+            val near = if (info.totalItemsCount == 0) true
+                else info.visibleItemsInfo.lastOrNull()?.let { it.index >= info.totalItemsCount - 2 } ?: true
+            Triple(list.firstVisibleItemIndex, anchor, near)
+        }.collect { (firstIdx, anchor, near) ->
+            lastFirstIndex = firstIdx
+            if (anchor != null) lastAnchor = anchor
+            lastNearBottom = near
+        }
+    }
     // Follow the newest message (not older pages being prepended at the top).
     val newest = model.messages.lastOrNull()?.id
-    // Opened from a notification: at that message (once it is loaded), otherwise at the newest.
-    var focus by remember(init) { mutableStateOf(init.transferFocus) }
-    LaunchedEffect(newest, active) {
-        if (!active || model.messages.isEmpty()) return@LaunchedEffect
-        val at = focus?.let { id -> rows.indexOfFirst { row -> row is SingleRow && row.message.id == id || row is StackRow && row.items.any { it.id == id } } }?.takeIf { it >= 0 }
-        // The last row (index rows.size: the spacer comes first); the list's own item count is
-        // still 0 before its first layout.
-        if (at != null) { list.scrollToItem(at + 1); focus = null } else list.scrollToItem(rows.size)
+    LaunchedEffect(rows, focus) {
+        if (rows.isEmpty()) {
+            prevRows = rows
+            lastNewest = null
+            return@LaunchedEffect
+        }
+        val at = focus?.let { id ->
+            rows.indexOfFirst { row -> row is SingleRow && row.message.id == id || row is StackRow && row.items.any { it.id == id } }
+        }?.takeIf { it >= 0 }
+        if (at != null) {
+            list.scrollToItem(at + 1)
+            focus = null
+            initialized = true
+        } else if (!initialized) {
+            list.scrollToItem(rows.size)
+            initialized = true
+        } else {
+            val prevFirstKey = prevRows.firstOrNull()?.let(::transferRowKey)
+            val currFirstKey = rows.firstOrNull()?.let(::transferRowKey)
+            val olderPrepended = prevFirstKey != null && currFirstKey != null && prevFirstKey != currFirstKey &&
+                rows.any { transferRowKey(it) == prevFirstKey }
+            if (olderPrepended && (list.firstVisibleItemIndex == 0 || lastFirstIndex == 0)) {
+                val anchor = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key != "top" }?.let { it.key to it.offset } ?: lastAnchor
+                val anchorKey = anchor?.first ?: prevFirstKey
+                val shifted = rows.indexOfFirst { transferRowKey(it) == anchorKey }
+                if (shifted >= 0) {
+                    val offsetPx = if (anchor?.first == anchorKey) (-anchor.second).coerceAtLeast(0) else 0
+                    list.scrollToItem(shifted + 1, offsetPx)
+                }
+            } else if (newest != null && newest != lastNewest) {
+                if (model.messages.lastOrNull()?.self == true || lastNearBottom) {
+                    list.scrollToItem(rows.size)
+                }
+            }
+        }
+        prevRows = rows
+        lastNewest = newest
     }
     // Reaching the top loads the next older page.
     val atTop by remember { derivedStateOf { list.firstVisibleItemIndex == 0 } }
-    // Only while shown: under another tab the list has not scrolled to the newest message yet and sits at the top.
-    LaunchedEffect(atTop, model.hasOlderMessages, model.messages.size, active) { if (active && atTop && !model.olderLoadFailed && model.hasOlderMessages && model.messages.isNotEmpty()) actions.loadOlder() }
+    // Only while shown and after initial bottom positioning.
+    LaunchedEffect(atTop, model.hasOlderMessages, model.messages.size, active, initialized) {
+        if (active && initialized && atTop && !model.olderLoadFailed && model.hasOlderMessages && model.messages.isNotEmpty()) actions.loadOlder()
+    }
 
     // Unfolded text folds again once it has been off screen for half a viewport's height of scrolling.
     val textFold = remember(list, textLines, revealed) { TextFoldTracker(list, listOf(textLines, revealed)) }
@@ -294,7 +358,7 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
     }
     var scrollSettled by remember { mutableStateOf(true) }
     LaunchedEffect(list.isScrollInProgress) { if (list.isScrollInProgress) scrollSettled = false else { delay(80); scrollSettled = true } }
-    fun rowKey(row: TransferRow): Any = when (row) { is SingleRow -> row.message.id; is StackRow -> "stack:${row.batch}:${row.first.id}" }
+    fun rowKey(row: TransferRow): Any = transferRowKey(row)
     fun expand(row: StackRow) {
         if (morph != null) return
         morph = BatchMorph(row.batch, true, row.items, row.items.indexOfFirst { it.id == stackTop[row.batch] }.coerceAtLeast(0), rowKey(row))
@@ -460,13 +524,14 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
                                         onImage = { openImage(m) }, onFile = { openFile(m) }, onDownload = { actions.download(m) },
                                         onLongPress = { at -> messageMenu = m.id to at },
                                         side = {
+                                            val sideLang = com.hachiwii.oink.LocalAppLang.current
                                             // Revealed password text: 隐藏 beside the bubble like 展开 / 收起 (2026-11-11);
                                             // none while the text is still on its way (the bubble says why).
                                             if (secret != null && shownSecret && !m.textPending) SidePill(m.self, visible = true) {
-                                                StackPill(DesignIconData.lucideChevronUp, appText("隐藏", "Hide"), null, appText("隐藏内容", "Hide content")) { secret.onToggle() }
+                                                StackPill(DesignIconData.lucideChevronUp, com.hachiwii.oink.L10n.translate("隐藏", sideLang), null, com.hachiwii.oink.L10n.translate("隐藏内容", sideLang)) { secret.onToggle() }
                                             }
                                             if (batch != null) SidePill(m.self, visible = mo == null && scrollSettled && !list.isScrollInProgress && hideAt == m.id) {
-                                                StackPill(DesignIconData.lucideChevronsDownUp, appText("收起", "Collapse"), null, appText("收起为一叠", "Collapse into a stack")) { collapse(batch, m) }
+                                                StackPill(DesignIconData.lucideChevronsDownUp, com.hachiwii.oink.L10n.translate("收起", sideLang), null, com.hachiwii.oink.L10n.translate("收起为一叠", sideLang)) { collapse(batch, m) }
                                             }
                                         }) {
                                         if (menuAt != null && menuAt.first == m.id) MessageMenu(m, menuAt.second, onDismiss = { messageMenu = null },
@@ -508,9 +573,15 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
                 morph?.let { MorphOverlay(it, { list.layoutInfo }, Modifier.matchParentSize().clipToBounds()) }
             }
             // Composer: proxy picker + input pill (tr-composer-wrap: 8 16 6).
+            val lang = com.hachiwii.oink.LocalAppLang.current
+            val targetDesc = com.hachiwii.oink.L10n.translate("发送对象：", lang) +
+                (if (composing.noneOnline) com.hachiwii.oink.L10n.translate("没有其它设备在线", lang)
+                else known?.name ?: com.hachiwii.oink.L10n.translate("未选择", lang))
+            val sendDesc = com.hachiwii.oink.L10n.translate("发送", lang)
+            val attachDesc = com.hachiwii.oink.L10n.translate("添加附件", lang)
             Row(Modifier.fillMaxWidth().background(c.bg).padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (composing.picker) Box(Modifier.size(44.dp, 48.dp).press(shape = RoundedCornerShape(14.dp)) { menu = if (menu == "proxy") null else "proxy" }
-                    .semantics { contentDescription = appText("发送对象：", "Send to: ") + (if (composing.noneOnline) appText("没有其它设备在线", "no other device online") else known?.name ?: appText("未选择", "none")) },
+                    .semantics { contentDescription = targetDesc },
                     contentAlignment = Alignment.Center) {
                     // Nothing online: a dark grey ban sign in place of a device badge.
                     if (composing.noneOnline) Box(Modifier.size(32.dp, 36.dp), contentAlignment = Alignment.Center) { Lucide(DesignIconData.lucideBan, 24.dp, c.text2) }
@@ -537,9 +608,9 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
                     else if (model.composer.isNotBlank()) Box(Modifier.size(40.dp).clip(CircleShape).background(c.accentSoft3).press {
                         sendText()
                     }
-                        .semantics { contentDescription = "发送" }, contentAlignment = Alignment.Center) { Lucide(DesignIconData.lucideArrowRight, 22.dp, c.accentInk) }
+                        .semantics { contentDescription = sendDesc }, contentAlignment = Alignment.Center) { Lucide(DesignIconData.lucideArrowRight, 22.dp, c.accentInk) }
                     else Box(Modifier.size(40.dp).clip(CircleShape).press { if (proxyOffline) warn() else menu = if (menu == "attach") null else "attach" }
-                        .semantics { contentDescription = "添加附件" }, contentAlignment = Alignment.Center) { Lucide(DesignIconData.lucidePlus, 23.dp, c.muted) }
+                        .semantics { contentDescription = attachDesc }, contentAlignment = Alignment.Center) { Lucide(DesignIconData.lucidePlus, 23.dp, c.muted) }
                 }
             }
         }
@@ -555,7 +626,7 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
                     if (menu == "proxy") {
                         MenuRow(onClick = { chosenProxy = null; actions.chooseTarget(null); menu = null; toast = null }) {
                             Box(Modifier.size(27.dp, 30.dp), contentAlignment = Alignment.Center) { activeTarget?.let { PlatformIcon(it.platform, scale = .65f) } }
-                            Column(Modifier.weight(1f)) { T(appText("当前活跃", "Currently active"), 13f, c.text2); activeTarget?.let { T(it.name, 10f, c.hint) } }
+                            Column(Modifier.weight(1f)) { T(appText("当前活跃", "Currently active"), 13f, c.text2); activeTarget?.let { T(it.name, 10f, c.hint, raw = true) } }
                             if (chosenProxy == null) Lucide(DesignIconData.lucideCheck, 15.dp, c.accentInk)
                         }
                         // Online devices only, live: 电脑, then 移动设备 (2026-11-11 review).
@@ -568,7 +639,7 @@ fun TransferPage(model: AppModel, init: UiInit, ui: UiState, actions: AppActions
                                 val sel = p.id == chosenProxy
                                 MenuRow(onClick = { chosenProxy = p.id; actions.chooseTarget(p.id); menu = null; toast = null }) {
                                     Box(Modifier.size(27.dp, 30.dp), contentAlignment = Alignment.Center) { PlatformIcon(p.platform, scale = .65f) }
-                                    T(p.name, 13f, if (sel) c.accentInk else c.text2, Modifier.weight(1f), lineHeight = 18.2f)
+                                    T(p.name, 13f, if (sel) c.accentInk else c.text2, Modifier.weight(1f), lineHeight = 18.2f, raw = true)
                                     if (sel) Lucide(DesignIconData.lucideCheck, 15.dp, c.accentInk)
                                 }
                             }
@@ -745,8 +816,18 @@ private class MenuPosition(private val at: Offset, private val density: Density,
     }
 }
 
-/** Text in the app language: Chinese when the locale is Chinese, English otherwise (as on iOS). */
-internal fun appText(zh: String, en: String) = if (Locale.getDefault().language == "zh") zh else en
+internal fun transferRowKey(row: TransferRow): Any = when (row) {
+    is SingleRow -> row.message.id
+    is StackRow -> "stack:${row.batch}:${row.first.id}"
+}
+
+/** Text in the app language, routed through [L10n] so all configured languages stay in sync. */
+internal fun appText(zh: String, en: String): String {
+    val lang = com.hachiwii.oink.L10n.current
+    if (lang == com.hachiwii.oink.AppLang.ZH) return zh
+    val translated = com.hachiwii.oink.L10n.translate(zh, lang)
+    return if (translated != zh || !com.hachiwii.oink.L10n.containsCjk(zh)) translated else en
+}
 
 /**
  * Tap plus long press (the message menu), without ripple like [press]. The long press reports where
@@ -812,27 +893,35 @@ private fun MessageFrame(m: MessageUi, continuation: Boolean, status: MessageUi?
 @Composable
 private fun SendStatus(m: MessageUi) {
     val c = Oink.colors
+    val lang = com.hachiwii.oink.LocalAppLang.current
     Row(Modifier.padding(top = 5.dp).heightIn(min = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
         when {
             // A phone-to-phone transfer that ended early, on either side.
-            m.ended == "cancelled" -> { Lucide(DesignIconData.lucideX, 11.dp, c.hint); T(appText("已取消", "Cancelled"), 9f, c.hint, lineHeight = 12.6f) }
+            m.ended == "cancelled" -> { Lucide(DesignIconData.lucideX, 11.dp, c.hint); T("已取消", 9f, c.hint, lineHeight = 12.6f) }
             m.ended == "failed" -> {
                 Lucide(DesignIconData.lucideAlertCircle, 11.dp, c.badInk)
                 // The other side going away, or another reason (storage full, interrupted).
-                T(when {
-                    m.failure != null && m.self -> appText("发送失败：${m.failure}", "Send failed: ${m.failure}")
-                    m.failure != null -> appText("接收失败：${m.failure}", "Receive failed: ${m.failure}")
-                    m.self -> appText("对方已断开，发送失败", "Disconnected, send failed")
-                    else -> appText("对方已断开，接收失败", "Disconnected, receive failed")
-                }, 9f, c.badInk, lineHeight = 12.6f)
+                val text = when {
+                    m.failure != null && m.self -> com.hachiwii.oink.L10n.translate("发送失败：${m.failure}", lang)
+                    m.failure != null -> com.hachiwii.oink.L10n.translate("接收失败：${m.failure}", lang)
+                    m.self -> com.hachiwii.oink.L10n.translate("对方已断开，发送失败", lang)
+                    else -> com.hachiwii.oink.L10n.translate("对方已断开，接收失败", lang)
+                }
+                T(text, 9f, c.badInk, lineHeight = 12.6f, raw = true)
             }
-            m.failure != null -> T("发送失败：${m.failure}", 9f, c.badInk, lineHeight = 12.6f)
-            !m.sent -> T(when {
-                m.progress == null || m.kind == "text" -> appText("正在发送…", "Sending…")
-                m.toName != null -> appText("正在发送给 ${m.toName} · ${m.progress}%", "Sending to ${m.toName} · ${m.progress}%")
-                else -> appText("发送进度 ${m.progress}%", "Sending ${m.progress}%")
-            }, 9f, c.hint, lineHeight = 12.6f, tabular = true)
-            else -> { Lucide(DesignIconData.lucideCheck, 11.dp, c.hint); T(m.toName?.let { appText("已发送给 $it", "Sent to $it") } ?: "", 9f, c.hint, lineHeight = 12.6f) }
+            m.failure != null -> T(com.hachiwii.oink.L10n.translate("发送失败：${m.failure}", lang), 9f, c.badInk, lineHeight = 12.6f, raw = true)
+            !m.sent -> {
+                val text = when {
+                    m.progress == null || m.kind == "text" -> com.hachiwii.oink.L10n.translate("正在发送…", lang)
+                    m.toName != null -> com.hachiwii.oink.L10n.translate("正在发送给 ${m.toName} · ${m.progress}%", lang)
+                    else -> com.hachiwii.oink.L10n.translate("发送进度 ${m.progress}%", lang)
+                }
+                T(text, 9f, c.hint, lineHeight = 12.6f, tabular = true, raw = true)
+            }
+            else -> {
+                Lucide(DesignIconData.lucideCheck, 11.dp, c.hint)
+                T(m.toName?.let { com.hachiwii.oink.L10n.translate("已发送给 $it", lang) } ?: "", 9f, c.hint, lineHeight = 12.6f, raw = true)
+            }
         }
     }
 }
@@ -887,7 +976,7 @@ private fun Avatar(platform: String, hidden: Boolean, privileged: Boolean) {
 private fun Meta(m: MessageUi) {
     val c = Oink.colors
     Row(Modifier.padding(bottom = 6.dp).height(16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        T(m.senderName, 10f, c.muted, Modifier.widthIn(max = 220.dp), lineHeight = 16f, ellipsis = true)
+        T(m.senderName, 10f, c.muted, Modifier.widthIn(max = 220.dp), lineHeight = 16f, ellipsis = true, raw = true)
         if (m.proxyName != null) Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
             T("经", 10f, c.hint, lineHeight = 16f)
             Box(Modifier.size(12.dp), contentAlignment = Alignment.Center) {
@@ -897,7 +986,7 @@ private fun Meta(m: MessageUi) {
                     else -> SvgIcon(DesignIconData.osMac, 11.dp, tint = c.muted)
                 }
             }
-            T(m.proxyName, 10f, c.hint, Modifier.widthIn(max = 120.dp), lineHeight = 16f, ellipsis = true)
+            T(m.proxyName, 10f, c.hint, Modifier.widthIn(max = 120.dp), lineHeight = 16f, ellipsis = true, raw = true)
             Spacer(Modifier.width(0.dp))
             Box(Modifier.size(5.dp).clip(CircleShape).background(if (m.proxyOnline) c.good else c.dotOff))
         } else Box(Modifier.size(5.dp).clip(CircleShape).background(if (m.senderOnline) c.good else c.dotOff))
@@ -930,16 +1019,19 @@ private fun Bubble(m: MessageUi, hooks: ImageHooks, registry: MorphRegistry, inB
             val image = rememberImage(m.imagePath, 720)
             val thumbnail = rememberImage(m.thumbnailPath.takeIf { image == null }, 720)
             val size = contain(itemAspect(m, image ?: thumbnail), BATCH_MEDIA_WF, BATCH_MEDIA_HF)
+            val imgDesc = com.hachiwii.oink.L10n.translate(imageDescription(m), com.hachiwii.oink.LocalAppLang.current)
             Box(Modifier.size(size.width.dp, size.height.dp).morphSource(registry.bubbles, m.id).previewSource(m.id, hooks)
-                .pressLong(onClick = onImage, onLongClick = onLongPress).semantics { contentDescription = imageDescription(m) }
+                .pressLong(onClick = onImage, onLongClick = onLongPress).semantics { contentDescription = imgDesc }
                 .clip(shape).background(c.fill).mediaEdge(c, shape, shown = image != null || thumbnail != null), contentAlignment = Alignment.Center) {
                 MediaContent(m, image, thumbnail, 36.dp)
             }
         }
         // Received and own pictures are 220 wide (native-rewrite.md 「图片尺寸」); own ones sit
         // against the right edge like every own bubble.
-        m.kind == "image" -> Box(Modifier.width(220.dp).pressLong(onClick = onImage, onLongClick = onLongPress).semantics { contentDescription = imageDescription(m) },
-            contentAlignment = if (m.self) Alignment.TopEnd else Alignment.TopStart) {
+        m.kind == "image" -> {
+            val imgDesc = com.hachiwii.oink.L10n.translate(imageDescription(m), com.hachiwii.oink.LocalAppLang.current)
+            Box(Modifier.width(220.dp).pressLong(onClick = onImage, onLongClick = onLongPress).semantics { contentDescription = imgDesc },
+                contentAlignment = if (m.self) Alignment.TopEnd else Alignment.TopStart) {
             val image = rememberImage(m.imagePath, 720)
             val thumbnail = rememberImage(m.thumbnailPath.takeIf { image == null }, 720)
             // The image's own proportions once its thumbnail tells them (own pictures: the file's),
@@ -960,6 +1052,7 @@ private fun Bubble(m: MessageUi, hooks: ImageHooks, registry: MorphRegistry, inB
                 .mediaEdge(c, shape, shown = image != null)) {
                 if (image != null) Image(image, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else FullVector(DesignIconData.previewImage)
             }
+        }
         }
         else -> FileMessageCard(m, if (inBatch) Modifier.width(BATCH_FILE_W).morphSource(registry.bubbles, m.id) else Modifier.widthIn(min = 200.dp),
             onFile, onDownload, onLongPress)
@@ -1034,9 +1127,10 @@ private fun TextBubble(text: String, fill: Color, shape: Shape, lines: Int, onMo
                         topLeft = Offset(0f, h - 3 * line), size = Size(size.width, 3 * line), blendMode = BlendMode.DstIn)
                 }
             }
+        val hiddenDesc = com.hachiwii.oink.L10n.translate("已隐藏的内容", com.hachiwii.oink.LocalAppLang.current)
         if (doc != null) RichContent(doc, c.bubbleInk, fold.onSizeChanged { total = it.height / with(density) { RICH_LINE_DP.dp.toPx() } })
         // Same hyphen break opportunity as T().
-        else BasicText(body.replace("-", "-​"), fold.then(if (masked) Modifier.semantics { contentDescription = appText("已隐藏的内容", "Hidden content") } else Modifier),
+        else BasicText(body.replace("-", "-​"), fold.then(if (masked) Modifier.semantics { contentDescription = hiddenDesc } else Modifier),
             style = textStyle(14f, if (masked || pending) c.hint else c.bubbleInk, lineHeight = 23.1f), onTextLayout = { total = it.lineCount.toFloat() })
         if (total == 0f || (foldsAt(total) && (lines < total || fullFrom != null)))
             BubbleRow(appText("查看更多", "Show more"), DesignIconData.lucideChevronDown, Modifier.layoutId("more"), onLongPress, onMore)
@@ -1110,9 +1204,10 @@ private fun SelectableText(text: String, color: Color, onEnd: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { state.edit { selectAll() }; focus.requestFocus() }
     BackHandler { onEnd() }
+    val selectDesc = com.hachiwii.oink.L10n.translate("选择文字", com.hachiwii.oink.LocalAppLang.current)
     CompositionLocalProvider(LocalTextSelectionColors provides TextSelectionColors(handleColor = c.accent, backgroundColor = c.accent.copy(alpha = .3f))) {
         BasicTextField(state, Modifier.focusRequester(focus).onFocusChanged { if (it.isFocused) focused = true else if (focused) onEnd() }
-            .semantics { contentDescription = appText("选择文字", "Select text") },
+            .semantics { contentDescription = selectDesc },
             readOnly = true, textStyle = textStyle(14f, color, lineHeight = 23.1f), lineLimits = TextFieldLineLimits.MultiLine(),
             cursorBrush = SolidColor(c.accent))
     }
@@ -1243,7 +1338,7 @@ private fun FolderPage(f: FolderUi, onBack: () -> Unit, onItem: (FolderItemUi) -
         Row(Modifier.fillMaxWidth().height(64.dp).drawBehind { drawRect(c.lineSolid, Offset(0f, size.height - 1.dp.toPx()), Size(size.width, 1.dp.toPx())) }.padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton48(Modifier, "返回", onClick = onBack) { Lucide(DesignIconData.lucideChevronLeft, 23.dp, c.ink) }
-            T(f.name, 17f, c.ink, weight = 700, lineHeight = 23.8f)
+            T(f.name, 17f, c.ink, weight = 700, lineHeight = 23.8f, raw = true)
         }
         val error = f.error
         // A listing that ended without a page replaces the spinner (it never comes); entries already shown stay.

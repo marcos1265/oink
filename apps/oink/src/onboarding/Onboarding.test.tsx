@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { OinkProvider } from 'oink-ui';
 import { DEFAULT_ACCENT } from '../settings/appearance';
 import { setLanguage } from '../i18n';
-import { api, shell } from '../api/client';
+import { api } from '../api/client';
 import { pairingApi } from '../api/pairing';
 import type { Pairing } from '../pairing/usePairing';
 import type { PrefsApi } from '../settings/prefs';
@@ -37,8 +37,7 @@ function fixture(extras: Partial<OnboardingProps> = {}) {
   return { props, actions, view };
 }
 async function next() { fireEvent.click(screen.getByRole('button', { name: 'Next' })); }
-async function telemetry() { await next(); await screen.findByText('Help us improve Oink'); }
-async function connect() { await telemetry(); await next(); await screen.findByText('Connect your other devices'); }
+async function connect() { await next(); await screen.findByText('Connect your other devices'); }
 
 it('persists only explicit accent and appearance edits from the welcome page', async () => {
   const { props, view } = fixture(); render(view());
@@ -50,43 +49,14 @@ it('persists only explicit accent and appearance edits from the welcome page', a
   expect(props.preferences.saveLocal).toHaveBeenCalledWith({ theme_accent: { light: '#2E7BFF', dark: '#2E7BFF' } });
 });
 
-it.each(['en', 'zh-Hans'] as const)('shows only the crash-report row and opens privacy without changing consent in %s', async language => {
-  setLanguage(language); const open = vi.spyOn(shell, 'openUrl').mockResolvedValue();
-  const { props, view } = fixture(); render(view());
-  fireEvent.click(screen.getByRole('button', { name: language === 'en' ? 'Next' : '下一步' }));
-  const privacy = await screen.findByRole('link', { name: language === 'en' ? 'View privacy policy' : '查看隐私政策' });
-  expect(document.querySelectorAll('.ob-telemetry__card .ok-row')).toHaveLength(1);
-  expect(screen.queryByText(language === 'en' ? 'Support Oink development' : '赞助 Oink 的开发')).toBeNull();
-  expect(screen.queryByRole('button', { name: language === 'en' ? 'WeChat Pay' : '微信支付' })).toBeNull();
-  expect(screen.queryByRole('link', { name: 'Ko-fi' })).toBeNull();
-  expect(screen.queryByRole('dialog')).toBeNull();
-  expect(document.body.textContent).toContain(language === 'en' ? 'Sentry (EU data centre)' : 'Sentry（欧盟数据中心）');
-  expect((screen.getByRole('switch') as HTMLInputElement).checked).toBe(false);
-  fireEvent.click(privacy);
-  expect(open).toHaveBeenCalledWith('https://github.com/oinkvm/oink/blob/main/PRIVACY.md');
-  expect(props.preferences.chooseReport).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: language === 'en' ? 'Next' : '下一步' }));
-  await waitFor(() => expect(props.preferences.chooseReport).toHaveBeenCalledWith(false));
-});
-
-it('goes from welcome straight to crash reports on Windows, leaving launch at login to Settings', async () => {
+it('skips the telemetry step and goes straight from welcome to connect on Windows', async () => {
   const { props, view } = fixture({ platform: 'win' }); render(view());
   await next();
-  await screen.findByText('Help us improve Oink');
-  expect(screen.queryByRole('switch', { name: 'Launch at login' })).toBeNull();
-  expect(document.querySelector('.ob')?.getAttribute('data-step')).toBe('telemetry');
+  await screen.findByText('Connect your other devices');
+  expect(screen.queryByText('Help us improve Oink')).toBeNull();
+  expect(document.querySelector('.ob')?.getAttribute('data-step')).toBe('connect');
+  expect(props.preferences.chooseReport).not.toHaveBeenCalled();
   expect(props.preferences.confirmLaunchAtLogin).not.toHaveBeenCalled();
-});
-
-it('waits for consent persistence before continuing, and lets a failed save be retried', async () => {
-  const { props, view } = fixture();
-  vi.mocked(props.preferences.chooseReport).mockRejectedValueOnce(new Error('offline'));
-  render(view()); await telemetry();
-  fireEvent.click(screen.getByRole('switch')); await next();
-  await waitFor(() => expect(props.preferences.chooseReport).toHaveBeenCalledWith(true));
-  expect(screen.queryByText('Connect your other devices')).toBeNull();
-  await waitFor(() => expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(false));
-  await next(); await screen.findByText('Connect your other devices');
 });
 
 it('omits inapplicable permissions and reuses the request then Settings grant flow', async () => {
@@ -100,7 +70,7 @@ it('omits inapplicable permissions and reuses the request then Settings grant fl
   fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
   await screen.findByText('Skip remaining permissions');
   fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-  await screen.findByText('Help us improve Oink');
+  await screen.findByText('Connect your other devices');
 });
 
 it.each(['en', 'zh-Hans'] as const)('granting audio permission does not turn on forwarding in %s', async language => {
@@ -117,18 +87,17 @@ it.each(['en', 'zh-Hans'] as const)('granting audio permission does not turn on 
   expect(props.preferences.saveLocal).not.toHaveBeenCalled();
 });
 
-it('confirms login when grants are ready and skips Connect when already connected', async () => {
-  const { props, view } = fixture({ platform: 'mac', connected: true, perms: { accessibility: 'granted', input: 'granted', network: 'not_required', files: 'unsupported', audio: 'granted' } });
-  render(view()); await next(); await screen.findByText('Help us improve Oink'); await next();
-  expect(props.preferences.confirmLaunchAtLogin).toHaveBeenCalledWith(true);
+it('skips Connect and finishes immediately on Windows when already connected', async () => {
+  const { props, view } = fixture({ platform: 'win', connected: true });
+  render(view()); await next();
   await waitFor(() => expect(props.onFinish).toHaveBeenCalledTimes(1));
   expect(screen.queryByText('Connect your other devices')).toBeNull();
 });
 
 it('lets completion persistence be retried when Connect is skipped', async () => {
   const finish = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-  const { view } = fixture({ connected: true, onFinish: finish });
-  render(view()); await telemetry(); await next();
+  const { view } = fixture({ platform: 'win', connected: true, onFinish: finish });
+  render(view()); await next();
   await waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
   await next(); await waitFor(() => expect(finish).toHaveBeenCalledTimes(2));
 });

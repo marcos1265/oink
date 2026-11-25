@@ -138,10 +138,11 @@ internal fun VideoPage(m: MessageUi, path: String, current: Boolean, settled: Bo
         val aspect = s.aspect ?: (16f / 9f)
         val fitWidth = minOf(maxWidth, maxHeight * aspect)
         Box(Modifier.align(Alignment.Center).size(fitWidth, fitWidth / aspect).then(transition)) { controller.Picture(Modifier.fillMaxSize()) }
+        val playDesc = com.hachiwii.oink.L10n.translate(if (s.playing) "暂停" else "播放", com.hachiwii.oink.LocalAppLang.current)
         if (shown) {
             Box(Modifier.align(Alignment.Center).size(64.dp).clip(CircleShape).background(MediaColors.scrim)
                 .press { if (s.playing) controller.pause() else controller.play(); touched++ }
-                .semantics { contentDescription = if (s.playing) appText("暂停", "Pause") else appText("播放", "Play") },
+                .semantics { contentDescription = playDesc },
                 contentAlignment = Alignment.Center) {
                 if (s.playing) Lucide(ViewerIcons.pauseFilled, 26.dp, MediaColors.icon)
                 else Lucide(ViewerIcons.play, 26.dp, MediaColors.icon, modifier = Modifier.offset(x = 2.dp))
@@ -164,6 +165,7 @@ private fun Scrubber(s: VideoState, modifier: Modifier, onSeek: (Long) -> Unit) 
     var dragging by remember { mutableStateOf<Float?>(null) }
     val fraction = dragging ?: if (s.durationMs > 0) (s.positionMs.toFloat() / s.durationMs).coerceIn(0f, 1f) else 0f
     fun seek(f: Float) { if (s.durationMs > 0) onSeek((f.coerceIn(0f, 1f) * s.durationMs).toLong()) }
+    val posDesc = com.hachiwii.oink.L10n.translate("播放进度", com.hachiwii.oink.LocalAppLang.current)
     Canvas(modifier.height(40.dp)
         .pointerInput(s) { detectTapGestures(onTap = { seek(it.x / size.width) }) }
         .pointerInput(s) {
@@ -178,7 +180,7 @@ private fun Scrubber(s: VideoState, modifier: Modifier, onSeek: (Long) -> Unit) 
             }
         }
         .semantics {
-            contentDescription = appText("播放进度", "Playback position")
+            contentDescription = posDesc
             progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
             setProgress { seek(it); true }
         }) {

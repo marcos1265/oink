@@ -322,8 +322,9 @@ internal fun MediaViewer(opened: MessageUi, messages: List<MessageUi>, origin: (
         }
         // Chrome: close at the top (and, for an item of a stack, its place in the stack); save,
         // open in another app and share at the bottom (white on dark).
+        val closeDesc = com.hachiwii.oink.L10n.translate("关闭", com.hachiwii.oink.LocalAppLang.current)
         Box(Modifier.fillMaxWidth().alpha(progress.value).windowInsetsPadding(WindowInsets.statusBars)) {
-            Box(Modifier.padding(start = 14.dp, top = 14.dp).press { close() }.semantics { contentDescription = "关闭" }) {
+            Box(Modifier.padding(start = 14.dp, top = 14.dp).press { close() }.semantics { contentDescription = closeDesc }) {
                 T("×", 30f, Color.White, lineHeight = 34f)
             }
             current?.let { batchPosition(messages, it.id) }?.let { (at, of) ->
@@ -481,7 +482,7 @@ internal fun FileCard(m: MessageUi, state: FileCardState, modifier: Modifier, on
             Box(Modifier.size(72.dp, 80.dp).clip(RoundedCornerShape(18.dp)).background(MediaColors.tile), contentAlignment = Alignment.Center) {
                 Lucide(glyph, 34.dp, MediaColors.icon, 1.6f)
             }
-            T(m.name, 16f, MediaColors.text, Modifier.padding(top = 18.dp), weight = 600, lineHeight = 22.4f, align = TextAlign.Center, maxLines = 3, ellipsis = true)
+            T(m.name, 16f, MediaColors.text, Modifier.padding(top = 18.dp), weight = 600, lineHeight = 22.4f, align = TextAlign.Center, maxLines = 3, ellipsis = true, raw = true)
             if (m.detail.isNotEmpty()) T(m.detail, 12f, MediaColors.text2, Modifier.padding(top = 6.dp), lineHeight = 16.8f, align = TextAlign.Center, tabular = true)
             state.status?.let { T(it, 13f, MediaColors.text2, Modifier.padding(top = 18.dp), lineHeight = 18.2f, align = TextAlign.Center) }
             Box(Modifier.padding(top = 22.dp).heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
@@ -500,7 +501,8 @@ internal fun FileCard(m: MessageUi, state: FileCardState, modifier: Modifier, on
 /** A bare light icon button of the viewer's chrome (48 target). */
 @Composable
 internal fun ChromeButton(modifier: Modifier, icon: IconData, label: String, size: Dp = 24.dp, onClick: () -> Unit) {
-    Box(modifier.size(48.dp).press(onClick = onClick).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+    val desc = com.hachiwii.oink.L10n.translate(label, com.hachiwii.oink.LocalAppLang.current)
+    Box(modifier.size(48.dp).press(onClick = onClick).semantics { contentDescription = desc }, contentAlignment = Alignment.Center) {
         Lucide(icon, size, MediaColors.icon)
     }
 }
@@ -514,8 +516,9 @@ internal fun ChromeButton(modifier: Modifier, icon: IconData, label: String, siz
 private fun SaveButton(modifier: Modifier, onSave: () -> Unit) {
     var saved by remember { mutableStateOf(false) }
     LaunchedEffect(saved) { if (saved) { delay(SAVE_CONFIRM_MS); saved = false } }
+    val desc = com.hachiwii.oink.L10n.translate(if (saved) "已保存到相册" else "保存到相册", com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.size(48.dp).press { if (!saved) { saved = true; onSave() } }
-        .semantics { contentDescription = if (saved) appText("已保存到相册", "Saved to Photos") else appText("保存到相册", "Save to Photos") },
+        .semantics { contentDescription = desc },
         contentAlignment = Alignment.Center) {
         Lucide(if (saved) DesignIconData.lucideCheck else DesignIconData.lucideDownload, 24.dp, MediaColors.icon)
     }

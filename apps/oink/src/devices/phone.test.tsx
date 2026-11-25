@@ -177,7 +177,7 @@ describe('phone context menu', () => {
   it('offers no screen, input, game or pause items and only endpoint audio actions', async () => {
     const onMobileAudio = vi.fn();
     menu(present(roles(true, false), state([true, false], [false, true])), { onMobileAudio });
-    expect(await items()).toEqual(['Stop using phone speaker', 'Use phone microphone', 'Connection Route', 'Remove from group']);
+    expect(await items()).toEqual(['Stop using phone speaker', 'Use phone microphone', 'Connection Route', 'Edit IP', 'Remove from group']);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Stop using phone speaker' }));
     expect(onMobileAudio).toHaveBeenCalledWith('phone', 'speaker', 'close');
   });
@@ -201,7 +201,7 @@ describe('phone context menu', () => {
   });
   it('offers nothing to start on a normal phone', async () => {
     menu(present(roles(false, false, { os: 'ios' }), state([false, false], [false, false])));
-    expect(await items()).toEqual(['Connection Route', 'Remove from group']);
+    expect(await items()).toEqual(['Connection Route', 'Edit IP', 'Remove from group']);
   });
   it('offline phone has no screen visibility item', async () => {
     menu(phone('ios', { group: 'offline' }));

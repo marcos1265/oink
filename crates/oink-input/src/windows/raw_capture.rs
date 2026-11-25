@@ -5,13 +5,14 @@ use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
-use windows::Win32::Foundation::{POINT, RECT};
+use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
-use windows::Win32::UI::WindowsAndMessaging::GetClipCursor;
+use windows::Win32::UI::WindowsAndMessaging::{GetClipCursor, PostMessageW};
 
 use super::dpi::ThreadDpiGuard;
 const ARG: &str = "--oink-raw-clip-guard";
+const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 fn current() -> Option<RECT> {
     let mut rect = RECT::default();
@@ -138,20 +139,32 @@ impl Drop for Lease {
 pub(super) struct RawCapture {
     pending: Option<Receiver<std::io::Result<Lease>>>,
     lease: Option<Lease>,
+    retry_after: Option<Instant>,
 }
 impl RawCapture {
-    /// Refreshed every 50 ms; false is also used before restoring local position.
-    pub fn update(&mut self, enabled: bool, park: POINT) {
+    /// Woken via WM_APP_RAW_CAPTURE_READY and refreshed every 200 ms while active;
+    /// false is also used before restoring local position.
+    pub fn update(&mut self, enabled: bool, park: POINT, wake_hwnd: isize) {
         if !enabled {
             if self.lease.is_some() {
                 tracing::info!(active = false, "remote game raw capture released");
             }
             self.pending = None;
             self.lease = None;
+            self.retry_after = None;
             return;
         }
+        let expected_owned = RECT {
+            left: park.x,
+            top: park.y,
+            right: park.x.saturating_add(1),
+            bottom: park.y.saturating_add(1),
+        };
         if let Some(lease) = &mut self.lease {
-            if matches!(lease.child.try_wait(), Ok(None)) && current() == Some(lease.owned) {
+            if lease.owned == expected_owned
+                && matches!(lease.child.try_wait(), Ok(None))
+                && current() == Some(lease.owned)
+            {
                 return;
             }
             // Guard was lost or another app changed confinement: stop allowing
@@ -164,7 +177,8 @@ impl RawCapture {
             match pending.try_recv() {
                 Ok(Ok(mut lease)) => {
                     self.pending = None;
-                    if current() == Some(lease.previous)
+                    if lease.owned == expected_owned
+                        && current() == Some(lease.previous)
                         && lease.pipe.as_mut().is_some_and(|p| p.write_all(b"A").is_ok())
                     {
                         lease.armed = true;
@@ -174,25 +188,32 @@ impl RawCapture {
                         if result.is_ok() {
                             tracing::info!(active = true, "remote game raw capture ready");
                             self.lease = Some(lease);
+                            self.retry_after = None;
                             return;
                         }
                     }
+                    self.retry_after = Some(Instant::now() + RETRY_BACKOFF);
+                    return;
                 }
                 Ok(Err(e)) => {
                     self.pending = None;
+                    self.retry_after = Some(Instant::now() + RETRY_BACKOFF);
                     tracing::warn!(%e, "cannot start game cursor guard");
+                    return;
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => self.pending = None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = None;
+                    self.retry_after = Some(Instant::now() + RETRY_BACKOFF);
+                    return;
+                }
             }
         }
+        if self.retry_after.is_some_and(|until| Instant::now() < until) {
+            return;
+        }
         let Some(previous) = current() else { return };
-        let owned = RECT {
-            left: park.x,
-            top: park.y,
-            right: park.x.saturating_add(1),
-            bottom: park.y.saturating_add(1),
-        };
+        let owned = expected_owned;
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         if let Err(e) = std::thread::Builder::new()
@@ -200,13 +221,42 @@ impl RawCapture {
             .spawn(move || {
                 let result = Lease::spawn(previous, owned);
                 let _ = tx.send(result);
+                if wake_hwnd != 0 {
+                    // SAFETY: best-effort notification to the hook thread's message window.
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(HWND(wake_hwnd as *mut _)),
+                            super::hook::WM_APP_RAW_CAPTURE_READY,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
             })
         {
             self.pending = None;
+            self.retry_after = Some(Instant::now() + RETRY_BACKOFF);
             tracing::warn!(%e, "cannot start game cursor guard worker");
         }
     }
     pub fn allows_move(&self) -> bool {
         self.lease.as_ref().is_some_and(|l| current() == Some(l.owned))
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabling_raw_capture_clears_retry_backoff() {
+        let mut capture = RawCapture {
+            retry_after: Some(Instant::now() + RETRY_BACKOFF),
+            ..Default::default()
+        };
+        capture.update(false, POINT { x: 100, y: 200 }, 0);
+        assert!(capture.retry_after.is_none());
+        assert!(capture.pending.is_none());
+        assert!(capture.lease.is_none());
     }
 }

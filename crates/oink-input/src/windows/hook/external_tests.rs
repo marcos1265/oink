@@ -471,4 +471,138 @@ fn physical_mouse_nested_in_the_busy_owner_keeps_the_guard_without_borrowing_it(
             assert_eq!(routed.load(Ordering::Relaxed), before, "{label}");
         }
     }
+
+    #[test]
+    fn independent_mouse_does_not_rehide_when_mouse_local_and_uncovers_when_disabled() {
+        use super::super::cursor::test_native as native;
+        struct LocalOrDisabledOwner {
+            mouse_local: bool,
+            mouse_disabled: bool,
+        }
+        impl crate::capture_loop::CaptureLoop for LocalOrDisabledOwner {
+            fn set_wake(&mut self, _: crate::capture_loop::Wake) {}
+            fn event(&mut self, _: &CapturedEvent) -> Disposition {
+                Disposition::Pass
+            }
+            fn poll(&mut self, _: Instant) -> Option<Instant> {
+                None
+            }
+            fn stopped(&self) -> bool {
+                false
+            }
+            fn mouse_local(&self) -> bool {
+                self.mouse_local
+            }
+            fn mouse_disabled(&self) -> bool {
+                self.mouse_disabled
+            }
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_independent_mouse(false);
+                crate::capture_loop::clear();
+                STATE.with(|s| {
+                    let _ = s.borrow_mut().take();
+                });
+                external::gap();
+                crate::quicker_compat::MOUSE.clear();
+            }
+        }
+        let _snapshot = PHYSICAL_SNAPSHOT.lock().unwrap();
+        let _reset = Reset;
+        external::gap();
+        crate::quicker_compat::MOUSE.clear();
+        set_independent_mouse(true);
+
+        // Case 1: mouse_local = true + independent_mouse: touching physical mouse must NOT re-hide.
+        crate::capture_loop::install(
+            Box::new(LocalOrDisabledOwner {
+                mouse_local: true,
+                mouse_disabled: false,
+            }),
+            Arc::new(|| {}),
+        );
+        let park = POINT { x: 1920, y: 1080 };
+        let _native = native::Guard::at(park);
+        let mut st = tests::remote_state();
+        st.hider = native::hider();
+        st.mode = CaptureMode::Local;
+        st.remote_park = Some(park);
+        let physical = MSLLHOOKSTRUCT::default();
+        let _ = st.prepare_mouse(WM_MOUSEMOVE, &physical, Instant::now());
+        assert!(matches!(st.mode, CaptureMode::Local));
+        assert!(!st.hider.is_hidden());
+
+        // Case 2: mouse_disabled = true + independent_mouse: external input still uncovers cover!
+        crate::capture_loop::install(
+            Box::new(LocalOrDisabledOwner {
+                mouse_local: false,
+                mouse_disabled: true,
+            }),
+            Arc::new(|| {}),
+        );
+        st.execute(Transition::Remote(park), Via::InHook);
+        st.last_physical_mouse = Some(Instant::now());
+        assert!(st.hider.is_hidden());
+        let mut passed = false;
+        STATE.with(|s| {
+            assert!(s.borrow_mut().replace(st).is_none());
+        });
+        let external_ev = MSLLHOOKSTRUCT {
+            pt: park,
+            flags: LLMHF_INJECTED,
+            ..Default::default()
+        };
+        let _ = mouse_proc_with_next(
+            0,
+            WPARAM(WM_MOUSEMOVE as usize),
+            LPARAM(&external_ev as *const _ as isize),
+            || {
+                passed = true;
+                LRESULT(0)
+            },
+        );
+        assert!(passed, "external input with mouse_disabled + independent_mouse must pass and uncover");
+        let st = STATE.with(|s| s.borrow_mut().take().unwrap());
+        assert!(matches!(st.mode, CaptureMode::Local));
+        assert!(!st.hider.is_hidden());
+    }
+}
+
+#[test]
+fn disabled_physical_mouse_still_refreshes_watchdog_timestamp_while_swallowing() {
+    struct DisabledOwner;
+    impl crate::capture_loop::CaptureLoop for DisabledOwner {
+        fn set_wake(&mut self, _: crate::capture_loop::Wake) {}
+        fn event(&mut self, _: &CapturedEvent) -> Disposition {
+            panic!("disabled physical mouse must be swallowed without routing")
+        }
+        fn poll(&mut self, _: Instant) -> Option<Instant> {
+            None
+        }
+        fn stopped(&self) -> bool {
+            false
+        }
+        fn mouse_disabled(&self) -> bool {
+            true
+        }
+    }
+    let f = Fixture::new();
+    crate::capture_loop::install(Box::new(DisabledOwner), Arc::new(|| {}));
+    let stale = Instant::now() - Duration::from_secs(5);
+    with_state(|st| {
+        st.handler = Arc::new(crate::capture_loop::event);
+        st.last_mouse_hook = stale;
+        st.pipeline.mouse_callbacks = 0;
+    });
+
+    assert_eq!(f.mouse(WM_MOUSEMOVE, 0), 1);
+    assert!(f.events.lock().unwrap().is_empty());
+
+    let (last_hook, callbacks) = with_state(|st| (st.last_mouse_hook, st.pipeline.mouse_callbacks)).unwrap();
+    let now = Instant::now();
+    assert!(last_hook > stale);
+    assert!(!hook_lost(now, Some(now), last_hook));
+    assert_eq!(callbacks, 1);
 }

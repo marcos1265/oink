@@ -529,6 +529,9 @@ impl Node {
         self.owner_authority(requester, group, &Message::ConfigPauseDevice(request.clone()))?;
         let remote = requester.device.0 != self.id();
         let paused = field(request.paused())?;
+        if !paused && self.remote_desktop() {
+            return Err(Failure::StateConflict);
+        }
         // Every pause/resume of this device passes here; record who asked
         // (local requests also log their entry point: UI/CLI, hotkey, menu).
         tracing::info!(

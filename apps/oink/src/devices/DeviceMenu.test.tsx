@@ -55,7 +55,7 @@ it('draws device glyphs at menu icon size, like the prototype', async () => {
 
 it('lists the online device items in prototype order with a danger kick', async () => {
   menu({ target: 'device:remote', screens: [{ id: 'remote:1', device: 'remote', name: 'Display 1', hidden: false }] });
-  expect(await items()).toEqual(['Lock pointer', 'Hide all screens', 'Input devices', 'Game mode', 'Set as audio output', 'Connection Route', 'Pause sharing', 'Remove from group']);
+  expect(await items()).toEqual(['Lock pointer', 'Hide all screens', 'Input devices', 'Game mode', 'Set as audio output', 'Connection Route', 'Edit IP', 'Pause sharing', 'Remove from group']);
   expect(screen.getByRole('menuitem', { name: 'Remove from group' }).className).toMatch(/danger/);
 });
 
@@ -164,4 +164,16 @@ it('offers single-screen hide for an online rigid computer', async () => {
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Hide this screen' }));
   expect(handlers.onHideScreen).toHaveBeenCalledWith('remote:1');
   expect(handlers.onScreensHidden).not.toHaveBeenCalled();
+});
+
+it.each(['self', 'online'] as const)('disables unavailable resume for a paused %s device while keeping screen edits available', async group => {
+  setLanguage('en');
+  const onPause = vi.fn();
+  menu({ target: 'device:remote', devices: [{ ...remote, group, paused: true, pauseReason: 'remote_desktop', canPause: false }], onPause,
+    screens: [{ id: 'remote:1', device: 'remote', name: 'Display', hidden: false }] });
+  const resume = await screen.findByRole('menuitem', { name: 'Resume sharing' });
+  expect(resume.getAttribute('aria-disabled')).toBe('true');
+  fireEvent.click(resume);
+  expect(onPause).not.toHaveBeenCalled();
+  expect((await screen.findByRole('menuitem', { name: 'Hide all screens' })).getAttribute('aria-disabled')).not.toBe('true');
 });

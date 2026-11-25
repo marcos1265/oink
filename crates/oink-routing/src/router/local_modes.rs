@@ -46,7 +46,7 @@ impl Router {
     pub(super) fn reveal_local_mouse(&mut self, ev: &CapturedEvent) -> bool {
         if !self.local_mouse_hidden
             || !self.mouse_local()
-            || !ev.physical
+            || (!ev.physical && !self.cfg.settings.independent_mouse)
             || self.fully_paused
             || !self.capture_available
         {
@@ -218,6 +218,9 @@ impl Router {
                     self.out.push(Output::SetMode(CaptureMode::Remote {
                         park: self.park_point(),
                     }));
+                } else if mouse == InputMode::Disabled && self.cfg.settings.independent_mouse {
+                    self.local_mouse_hidden = false;
+                    self.out.push(Output::SetMode(CaptureMode::Local));
                 }
             }
         }

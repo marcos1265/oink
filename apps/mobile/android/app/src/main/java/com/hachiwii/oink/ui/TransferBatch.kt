@@ -197,10 +197,10 @@ internal fun FileCardContent(m: MessageUi) {
             }
             Spacer(Modifier.weight(1f))
             val ext = fileExt(m)
-            if (ext.isNotEmpty()) T(ext, 9f, c.stackCardHint, Modifier.padding(top = 1.dp), weight = 650, lineHeight = 12f, letterSpacing = .4f)
+            if (ext.isNotEmpty()) T(ext, 9f, c.stackCardHint, Modifier.padding(top = 1.dp), weight = 650, lineHeight = 12f, letterSpacing = .4f, raw = true)
         }
         Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            T(m.name, 12f, c.stackCardInk, weight = 600, lineHeight = 15.6f, maxLines = 3, ellipsis = true)
+            T(m.name, 12f, c.stackCardInk, weight = 600, lineHeight = 15.6f, maxLines = 3, ellipsis = true, raw = true)
             val detail = cardDetail(m)
             if (detail.isNotEmpty()) T(detail, 10f, c.stackCardHint, lineHeight = 14f, ellipsis = true, tabular = true)
         }
@@ -245,8 +245,9 @@ internal fun StackPill(icon: IconData, label: String, count: Int?, description: 
     val c = Oink.colors
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
+    val desc = com.hachiwii.oink.L10n.translate(description, com.hachiwii.oink.LocalAppLang.current)
     Box(modifier.clickable(source, indication = null, role = Role.Button, onClick = onClick).padding(horizontal = 4.dp, vertical = 8.dp)
-        .semantics { contentDescription = description }, contentAlignment = Alignment.Center) {
+        .semantics { contentDescription = desc }, contentAlignment = Alignment.Center) {
         Row(Modifier.height(32.dp).clip(RoundedCornerShape(16.dp)).background(if (pressed) OinkColors.mix(c.ink, c.chip, .1f) else c.chip)
             .indication(source, ripple()).padding(start = 9.dp, end = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -324,8 +325,12 @@ internal fun BatchStack(items: List<MessageUi>, top: Int, self: Boolean, hooks: 
     val pillIn = remember(batch) { Animatable(if (enter) 0f else 1f) }
     LaunchedEffect(enter) { if (enter) { pillIn.snapTo(0f); pillIn.animateTo(1f, tween(200, easing = EaseOut)); onEntered() } }
     val topItem = items[top]
+    val batchLang = com.hachiwii.oink.LocalAppLang.current
+    val batchDesc = com.hachiwii.oink.L10n.translate("$n 项，当前第 ${top + 1} 项：${topItem.name}。左右划动切换，轻点打开", batchLang)
+    val nextLabel = com.hachiwii.oink.L10n.translate("下一项", batchLang)
+    val prevLabel = com.hachiwii.oink.L10n.translate("上一项", batchLang)
     val pill: @Composable () -> Unit = {
-        StackPill(DesignIconData.lucideChevronsUpDown, appText("展开", "Expand"), n, appText("展开全部 $n 项", "Expand all $n items"),
+        StackPill(DesignIconData.lucideChevronsUpDown, com.hachiwii.oink.L10n.translate("展开", batchLang), n, com.hachiwii.oink.L10n.translate("展开全部 $n 项", batchLang),
             Modifier.graphicsLayer { alpha = pillIn.value * (if (hidden) 0f else 1f); scaleX = .85f + .15f * pillIn.value; scaleY = scaleX }, onExpand)
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -356,11 +361,10 @@ internal fun BatchStack(items: List<MessageUi>, top: Int, self: Boolean, hooks: 
             }
             .pressLong(onClick = { onOpen(items[current]) }, onLongClick = { onLongPress(items[current], it) })
             .semantics {
-                contentDescription = appText("$n 项，当前第 ${top + 1} 项：${topItem.name}。左右划动切换，轻点打开",
-                    "$n items, item ${top + 1}: ${topItem.name}. Swipe to switch, tap to open")
+                contentDescription = batchDesc
                 customActions = listOf(
-                    CustomAccessibilityAction(appText("下一项", "Next item")) { onTop((current + 1) % n); true },
-                    CustomAccessibilityAction(appText("上一项", "Previous item")) { onTop((current - 1 + n) % n); true },
+                    CustomAccessibilityAction(nextLabel) { onTop((current + 1) % n); true },
+                    CustomAccessibilityAction(prevLabel) { onTop((current - 1 + n) % n); true },
                 )
             }) {
             val roles = settling?.roles ?: stackRoles(n, top)

@@ -408,6 +408,7 @@ mod tests {
                 offline_reason: OfflineKind::Disconnected,
                 last_seen_ms: None,
                 rtt_ms: None,
+                connected_address: None,
                 live_boot: Some([1; 16]),
                 facts: None,
                 capabilities: vec![],

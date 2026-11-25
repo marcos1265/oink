@@ -239,6 +239,7 @@ export function SideContextMenu({ devices, screens = [], onHideScreen, onScreens
             {phoneItems}
             {phoneItems.length > 0 && <MenuSeparator/>}
             <RouteMenu d={d}/>
+            <MenuItem icon="edit" onSelect={() => onEditAddress(d.id)}>{tr('编辑 IP')}</MenuItem>
             <MenuSeparator/>
             {leaveItem}
           </> : <>
@@ -273,7 +274,7 @@ export function SideContextMenu({ devices, screens = [], onHideScreen, onScreens
             <MenuItem icon={glyph('speaker')} disabled={unavailable('speaker') && !d.speaker.canMakeExit} onSelect={() => onShare(d.id,'speaker',speakerReceiver ? 'unused' : 'exit')}>{speakerReceiver ? tr('关闭音频出口') : tr('设为音频出口')}</MenuItem>
             {exit && exit.id !== d.id && <MenuCheckboxItem closeOnSelect disabled={unavailable('speaker')} checked={speakerSource} onCheckedChange={on => onShare(d.id,'speaker',on ? 'forwarding' : 'unused')}>{tr('转发音频到 {0}',exit.name)}</MenuCheckboxItem>}
             {!exit && speakerSource && <MenuItem icon={glyph('speaker')} disabled={unavailable('speaker')} onSelect={() => onShare(d.id,'speaker','unused')}>{tr('停止共享')}</MenuItem>}
-            {!self && <><MenuSeparator/><RouteMenu d={d}/></>}
+            {!self && <><MenuSeparator/><RouteMenu d={d}/><MenuItem icon="edit" onSelect={() => onEditAddress(d.id)}>{tr('编辑 IP')}</MenuItem></>}
             <MenuSeparator/>
             <MenuItem icon={d.paused ? 'play' : PauseIcon} disabled={d.canPause === false} onSelect={() => onPause(d.id,!d.paused)}>{d.paused ? tr('恢复共享') : tr('暂停共享')}</MenuItem>
             {leaveItem}

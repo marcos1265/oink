@@ -173,6 +173,7 @@ codes!(PauseReason {
     RemoteUser,
     Emergency,
     InputBacklog,
+    RemoteDesktop,
     Unknown
 });
 codes!(DeliveryState {
@@ -512,6 +513,8 @@ pub struct DeviceCard {
     pub is_self: bool,
     pub section: CardSection,
     pub connection: CardConnection,
+    #[serde(default)]
+    pub connected_address: Option<String>,
     pub last_seen_ms: Option<u64>,
     pub status: Option<DeviceCardStatus>,
     pub pause: Option<LocalPauseCard>,

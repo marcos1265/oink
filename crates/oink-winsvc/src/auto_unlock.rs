@@ -157,29 +157,55 @@ fn call_with_id(
     }
 }
 pub fn auto_unlock_status() -> io::Result<AutoUnlockStatus> {
-    call(1, 0, 0, None)
+    Ok(AutoUnlockStatus {
+        enabled: false,
+        pending: false,
+        last_result: AutoUnlockResult::Idle,
+        failure_kind: AutoUnlockFailure::None,
+        windows_hello_only: false,
+        provider_ready_at_ms: 0,
+        remote_input_at_ms: 0,
+        remote_input_source: 0,
+        readiness_decision: 0,
+        succeeded_at_ms: 0,
+        now_ms: 0,
+        sync_id: 0,
+        sync_outcome: AutoUnlockSync::None,
+        sync_prepared: false,
+    })
 }
-/// Store after validating the password. Replaces the local failure latch.
-pub fn auto_unlock_save(password: &str) -> io::Result<()> {
-    call(2, 0, 0, Some(password)).map(|_| ())
+/// Store after validating the password. Disabled in this local-only build.
+pub fn auto_unlock_save(_password: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "auto unlock is disabled in local-only build",
+    ))
 }
 pub fn auto_unlock_disable() -> io::Result<()> {
-    call(3, 0, 0, None).map(|_| ())
+    Ok(())
 }
 /// Request one submission, never retry after an uncertain result.
-pub fn auto_unlock_remote_input(source: u64, age_ms: u32) -> io::Result<()> {
-    call(8, source, age_ms, None).map(|_| ())
+pub fn auto_unlock_remote_input(_source: u64, _age_ms: u32) -> io::Result<()> {
+    Ok(())
 }
 /// Request one submission after binding it to the source that answered the
-/// unlock query. The provider performs the final two-second readiness check.
-pub fn auto_unlock_attempt(source: u64) -> io::Result<()> {
-    call(4, source, 0, None).map(|_| ())
+/// unlock query. Disabled in this local-only build.
+pub fn auto_unlock_attempt(_source: u64) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "auto unlock is disabled in local-only build",
+    ))
 }
-/// Sync unlock: request one submission for a source that answered the unlock
-/// query on this session. Returns the operation id; it expires unconsumed after
-/// [`AUTO_UNLOCK_SYNC_WINDOW`] and is never retried.
-pub fn auto_unlock_sync_attempt(source: u64) -> io::Result<u64> {
-    call_with_id(9, source, 0, None).map(|(_, id)| id)
+/// Sync unlock: disabled in this local-only build.
+pub fn auto_unlock_sync_attempt(_source: u64) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "auto unlock is disabled in local-only build",
+    ))
+}
+#[allow(dead_code)]
+fn _keep_call_ref() {
+    let _ = call as usize;
 }
 #[cfg(all(test, windows))]
 mod tests {

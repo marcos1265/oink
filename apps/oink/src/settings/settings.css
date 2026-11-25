@@ -93,6 +93,7 @@ mark.setp__hit { background: var(--ok-accent-tint); color: inherit; border-radiu
 .setp__size { margin-right: 4px; font: 400 13px/1 var(--ok-font); font-variant-numeric: tabular-nums; color: var(--ok-text-2); white-space: nowrap; }
 /* About as wide as the page's selects. */
 .setp__mb.ok-input { width: 128px; }
+.setp__px.ok-input { width: 108px; }
 
 .setp__empty { display: grid; justify-items: center; gap: 8px; padding: 64px 0; color: var(--ok-text-3); font: 450 13px/1.4 var(--ok-font); }
 .setp__empty p { margin: 0; }

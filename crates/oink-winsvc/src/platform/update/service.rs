@@ -679,7 +679,10 @@ fn command_admitted(command: &Command, preparing: bool, active: bool) -> bool {
                     | Command::Cancel
             ))
 }
-pub(super) fn serve() {
+pub(super) fn serve() {}
+
+#[allow(dead_code)]
+pub(super) fn serve_disabled_orig() {
     let Some(events) = super::super::broker::events() else {
         return;
     };

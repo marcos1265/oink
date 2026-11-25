@@ -187,7 +187,17 @@ pub fn shell_show_panel(app: AppHandle, window: tauri::WebviewWindow) {
     }
     #[cfg(target_os = "macos")]
     crate::app::on_main(&app, move |_| crate::panel_macos::show(&window));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        if app.webview_windows().is_empty() {
+            // Free COM DLL references and release idle WebView2 state while living in the tray.
+            // SAFETY: CoFreeUnusedLibraries is safe on the STA UI thread.
+            unsafe {
+                windows::Win32::System::Com::CoFreeUnusedLibraries();
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = app;
 }
 
@@ -572,7 +582,17 @@ pub fn sync_activation(app: &AppHandle) {
             }));
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        if app.webview_windows().is_empty() {
+            // Free COM DLL references and release idle WebView2 state while living in the tray.
+            // SAFETY: CoFreeUnusedLibraries is safe on the STA UI thread.
+            unsafe {
+                windows::Win32::System::Com::CoFreeUnusedLibraries();
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = app;
 }
 

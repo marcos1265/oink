@@ -531,13 +531,17 @@ impl Owner {
         if self.needs_apply || self.member.journal.pending_projection().map_err(internal)?.is_some() {
             return Err(internal("group projection pending"));
         }
+        let previous = self.shared.local_facts.load();
+        let telemetry_only = super::facts::same_configuration(&previous, self.local.value());
         self.observe_links()?;
         self.shared.local_facts.publish(self.local.value().clone());
         self.broadcast(Message::ConfigFacts(self.local.value().clone()));
-        self.shared.emit(ConfigChange::Facts {
-            device: self.identity.id(),
-            capabilities_changed: false,
-        });
+        if !telemetry_only {
+            self.shared.emit(ConfigChange::Facts {
+                device: self.identity.id(),
+                capabilities_changed: false,
+            });
+        }
         self.local.value().fact_sequence().map_err(internal)
     }
     fn observe_links(&mut self) -> ApiResult<()> {
@@ -687,6 +691,26 @@ impl Owner {
         self.commit(candidate)
     }
     pub(crate) fn displays_changed(&mut self, displays: Vec<DisplayInfo>) -> ApiResult<()> {
+        // The session can move after enumeration but before this actor turn.
+        // Recheck at publication so that a queued RDP enumeration cannot replace
+        // console geometry before the ordinary observer publishes its pause.
+        #[cfg(windows)]
+        if self.require_console_displays && oink_winsvc::session::remote_desktop() {
+            return Ok(());
+        }
+        // A runtime session cause freezes the last console catalog, including
+        // edits that re-enumerate after a native transaction. Never publish RDP
+        // virtual geometry or clear a retained console layout with an empty list.
+        if self
+            .local
+            .value()
+            .pause()
+            .ok()
+            .flatten()
+            .is_some_and(|pause| pause.reason() == Ok(dto::PauseReason::RemoteDesktop))
+        {
+            return Ok(());
+        }
         self.displays_observed = true;
         self.displays = displays.clone();
         self.observe_display_facts()?;
@@ -919,9 +943,29 @@ impl Owner {
             .remember(device, address)
             .map_err(|_| ApiError::PersistenceFailed)?;
         self.links.update_addresses(device, self.member_candidates(device));
+        let active_addr = self.links.links().by_peer(device).and_then(|l| l.remote_address);
+        if active_addr != Some(address) {
+            let close_ids: Vec<_> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.peer_boot.device_id == device)
+                .map(|(id, _)| *id)
+                .collect();
+            if !close_ids.is_empty() {
+                for link_id in close_ids {
+                    self.close(link_id, Disconnect::Stopping);
+                }
+                self.links.flush_commands();
+            }
+            let dial = self.dials.entry(device).or_default();
+            dial.active = false;
+            dial.ready_link = None;
+            dial.failures = 0;
+        }
         let dial = self.dials.entry(device).or_default();
         dial.after = None;
         dial.requested = true;
+        dial.manual_override = Some(address);
         self.tick();
         Ok(())
     }

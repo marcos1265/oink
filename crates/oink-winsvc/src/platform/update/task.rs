@@ -41,7 +41,15 @@ pub(super) fn validate_definition(xml: &str) -> Result<(), Error> {
         unsafe { definition.SetXmlText(&BSTR::from(xml)) }.map_err(|_| Error::Storage)
     })
 }
-pub(super) fn register(tx: &str, xml: &str) -> Result<(), Error> {
+pub(super) fn register(_tx: &str, _xml: &str) -> Result<(), Error> {
+    Ok(())
+}
+pub(super) fn remove(_tx: &str) -> Result<(), Error> {
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn register_disabled_orig(tx: &str, xml: &str) -> Result<(), Error> {
     if !super::valid_transaction(tx) {
         return Err(Error::Policy);
     }
@@ -68,7 +76,8 @@ pub(super) fn register(tx: &str, xml: &str) -> Result<(), Error> {
         super::protected::system_only_sddl(&actual.to_string()).map_err(|_| Error::Policy)
     })
 }
-pub(super) fn remove(tx: &str) -> Result<(), Error> {
+#[allow(dead_code)]
+pub(super) fn remove_disabled_orig(tx: &str) -> Result<(), Error> {
     if !super::valid_transaction(tx) {
         return Err(Error::Policy);
     }

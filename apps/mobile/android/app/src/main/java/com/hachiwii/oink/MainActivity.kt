@@ -89,6 +89,7 @@ open class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        L10n.sync(this)
         enableEdgeToEdge(SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT), SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
         lifecycle.addObserver((application as OinkApplication).wifi.screen)
@@ -108,6 +109,9 @@ open class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 repository.microphonePermissionRequests.collect { microphonePermission.launch(Manifest.permission.RECORD_AUDIO) }
             }
+        }
+        lifecycleScope.launch {
+            repository.quitRequests.collect { finishAndRemoveTask() }
         }
     }
 

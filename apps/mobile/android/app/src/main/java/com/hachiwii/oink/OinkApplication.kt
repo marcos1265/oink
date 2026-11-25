@@ -7,6 +7,7 @@ import android.os.Bundle
 class OinkApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        L10n.sync(this)
         com.hachiwii.oink.recovery.RecoveryController.initialize(this)
         // The connection service follows Oink's visible screens (decisions 37 and 38): any visible
         // Oink Activity starts it; with the persistent notification off, the last one leaving stops it.

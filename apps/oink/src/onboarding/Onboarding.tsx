@@ -1,14 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { Button, ColorSwatches, Divider, Dots, DropdownMenu, Group, Icon, MenuRadioGroup, MenuRadioItem, MenuSeparator, Row, Switch, speed, useOink } from 'oink-ui';
+import { Button, ColorSwatches, Divider, Dots, DropdownMenu, Icon, MenuRadioGroup, MenuRadioItem, MenuSeparator, speed, useOink } from 'oink-ui';
 import { ACCENT_SWATCHES } from '../settings/appearance';
 import { FoldItem, NearbyRow, RefreshButton } from '../pairing/AddPanel';
 import { ManualSearch, PairBody } from '../pairing/PairDialog';
 import { Morph } from '../pairing/Morph';
 import { agent, useAgent } from '../api/store';
-import { shell } from '../api/client';
 import { pairingApi } from '../api/pairing';
-import { LANGUAGES, secondaryName, tr, trNodes, useLanguage } from '../i18n';
+import { LANGUAGES, secondaryName, tr, useLanguage } from '../i18n';
 import type { PrefsApi } from '../settings/prefs';
 import type { Pairing } from '../pairing/usePairing';
 import { useListPresence } from '../pairing/useListPresence';
@@ -21,11 +20,9 @@ import { FLY_MS } from './flight';
 import { WelcomeLogo } from './WelcomeLogo';
 import './onboarding.css';
 
-export type OnboardingStep = 'welcome' | 'perms' | 'telemetry' | 'connect';
+export type OnboardingStep = 'welcome' | 'perms' | 'connect';
 
-const EXIT_MS: Record<OnboardingStep, number> = { welcome: FLY_MS, perms: 260, telemetry: 260, connect: 260 };
-
-const PRIVACY_URL = 'https://github.com/oinkvm/oink/blob/main/PRIVACY.md';
+const EXIT_MS: Record<OnboardingStep, number> = { welcome: FLY_MS, perms: 260, connect: 260 };
 
 export interface OnboardingProps {
   platform: Platform;
@@ -72,9 +69,9 @@ export function Onboarding({ platform, pairing, perms, onGrant, onOpenSettings, 
   const connectedRef = useRef(connected);
   connectedRef.current = connected;
 
-  // Windows has no permissions to grant; launch at login lives in Settings only.
+  // Skip telemetry screen completely in local-only build.
   const nextOf = (s: OnboardingStep): OnboardingStep =>
-    s === 'welcome' ? (platform === 'mac' ? 'perms' : 'telemetry') : s === 'telemetry' ? 'connect' : 'telemetry';
+    s === 'welcome' ? (platform === 'mac' ? 'perms' : 'connect') : 'connect';
   const next = () => {
     if (exiting) return;
     const to = nextOf(step);
@@ -96,7 +93,6 @@ export function Onboarding({ platform, pairing, perms, onGrant, onOpenSettings, 
     <div className="ob" data-platform={platform} data-step={step} data-leaving={leaving ? '' : undefined} role="region" aria-label={tr('欢迎使用 Oink')}>
       {step === 'welcome' && <Welcome leaving={exiting} version={version} preferences={preferences} onNext={next} />}
       {step === 'perms' && <OnboardingPermissions preferences={preferences} perms={perms} onGrant={onGrant} onOpenSettings={onOpenSettings} container={container} leaving={exiting} onDone={next} />}
-      {step === 'telemetry' && <Telemetry leaving={exiting} preferences={preferences} onNext={next} />}
       {step === 'connect' && <Connect pairing={pairing} ready={connectReady} leaving={exiting} onSkip={onSkip} onFinish={onFinish} />}
     </div>
   );
@@ -154,46 +150,6 @@ function Welcome({ leaving, version, preferences, onNext }: { leaving: boolean; 
           extends the welcome scroller by 10px until its entrance ends. */}
       <footer className="ob-foot">
         <div className="ob-in" style={{ '--d': '2.1s' } as CSSProperties}><Button variant="accent" className="ob-next" trailing={<Icon name="arrow-right" />} onClick={onNext}>{tr('下一步')}</Button></div>
-      </footer>
-    </section>
-  );
-}
-
-function Telemetry({ leaving, preferences, onNext }: {
-  leaving: boolean;
-  preferences: PrefsApi;
-  onNext: () => void;
-}) {
-  const [on, setOn] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const proceed = async () => {
-    setSaving(true);
-    try { await preferences.chooseReport(on); onNext(); }
-    catch { agent.fail('unavailable'); }
-    finally { setSaving(false); }
-  };
-  return (
-    <section className="ob-page ob-telemetry" data-leaving={leaving ? '' : undefined}>
-      <div className="ob-main">
-        <div className="ob-col">
-          <h1 className="ob-title ob-in">{tr('帮助我们改进 Oink')}</h1>
-          <Group className="ob-perms__card ob-telemetry__card ob-in" style={{ '--d': '.06s' } as CSSProperties}>
-            <Row
-              label={tr('上报崩溃记录和性能数据')}
-              description={
-                <>
-                  {trNodes('崩溃和性能报告发送至 Sentry（欧盟数据中心），不含您的按键和个人信息，{0}',
-                    <a className="ob-a ok-focusable" href={PRIVACY_URL} target="_blank" rel="noreferrer" onClick={e => { e.preventDefault(); void shell.openUrl(PRIVACY_URL).catch(() => agent.fail('unavailable')); }}>{tr('查看隐私政策')}</a>)}
-                </>
-              }
-            >
-              <Switch aria-label={tr('上报崩溃记录和性能数据')} checked={on} onChange={setOn} />
-            </Row>
-          </Group>
-        </div>
-      </div>
-      <footer className="ob-foot ob-in" style={{ '--d': '.12s' } as CSSProperties}>
-        <Button variant="accent" className="ob-next" trailing={<Icon name="arrow-right" />} loading={saving} disabled={!preferences.report} onClick={() => { void proceed(); }}>{tr('下一步')}</Button>
       </footer>
     </section>
   );

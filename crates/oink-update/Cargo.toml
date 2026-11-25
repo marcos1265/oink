@@ -8,7 +8,7 @@ publish.workspace = true
 
 [features]
 test-feed = []
-http = ["dep:reqwest"]
+http = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +20,6 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 url = "2.5"
 semver = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

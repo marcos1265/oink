@@ -15,6 +15,7 @@ pub struct CardMember {
     pub offline_reason: OfflineKind,
     pub last_seen_ms: Option<u64>,
     pub rtt_ms: Option<f64>,
+    pub connected_address: Option<String>,
     pub live_boot: Option<[u8; 16]>,
     pub facts: Option<Arc<dto::DeviceFacts>>,
     /// Negotiated logical end-to-end capabilities, never a relay's capabilities.
@@ -80,6 +81,7 @@ impl CardInputs {
                     && a.ready == b.ready
                     && a.offline_reason == b.offline_reason
                     && a.last_seen_ms == b.last_seen_ms
+                    && a.connected_address == b.connected_address
                     && a.live_boot == b.live_boot
                     && a.capabilities == b.capabilities
                     && a.order == b.order
@@ -418,6 +420,11 @@ impl Projector {
             is_self: member.is_self,
             section,
             connection,
+            connected_address: if online && !member.is_self {
+                member.connected_address.clone()
+            } else {
+                None
+            },
             last_seen_ms: if online { None } else { member.last_seen_ms },
             status,
             pause,
@@ -637,10 +644,14 @@ impl<'a> OwnerContext<'a> {
             dto::PauseReason::RemoteUser => PauseReason::RemoteUser,
             dto::PauseReason::Emergency => PauseReason::Emergency,
             dto::PauseReason::InputBacklog => PauseReason::InputBacklog,
+            dto::PauseReason::RemoteDesktop => PauseReason::RemoteDesktop,
             dto::PauseReason::Unknown(_) => PauseReason::Unknown,
         };
-        let can_resume =
-            !self.mobile() && self.supports("oink.device/2") && self.group.is_some() && self.member.live_boot.is_some();
+        let can_resume = reason != PauseReason::RemoteDesktop
+            && !self.mobile()
+            && self.supports("oink.device/2")
+            && self.group.is_some()
+            && self.member.live_boot.is_some();
         let action = if can_resume {
             self.tokens.pause(
                 OwnerVersion {
@@ -1087,6 +1098,7 @@ mod tests {
             offline_reason: OfflineKind::Disconnected,
             last_seen_ms: Some(123),
             rtt_ms: None,
+            connected_address: None,
             live_boot: Some([id; 16]),
             facts: None,
             capabilities: vec!["oink.device/2".into(), "oink.device/2".into()],
@@ -1233,6 +1245,33 @@ mod tests {
         .into_iter()
         .collect();
         Arc::new(dto::DeviceFacts::from_raw(raw).unwrap())
+    }
+    #[test]
+    fn remote_desktop_pause_has_no_resume_token_for_self_or_peer() {
+        for id in [1, 2] {
+            let mut member = row(id, "device", true);
+            let mut facts = (*facts(&member, 0)).clone();
+            facts
+                .edit(|raw| {
+                    raw.insert(
+                        19,
+                        map([
+                            (1, true.write()),
+                            (2, dto::PauseReason::RemoteDesktop.write()),
+                            (3, 2u64.write()),
+                        ]),
+                    );
+                })
+                .unwrap();
+            member.facts = Some(Arc::new(facts));
+            let mut projector = Projector::new().unwrap();
+            let view = projector.update(&inputs(vec![member]), 1).unwrap();
+            let pause = view.cards[0].pause.as_ref().unwrap();
+            assert!(pause.paused);
+            assert_eq!(pause.reason, PauseReason::RemoteDesktop);
+            assert!(!pause.can_resume);
+            assert!(matches!(pause.action, CardAction::Unavailable { .. }));
+        }
     }
     #[test]
     fn unchanged_card_inputs_skip_projection_but_refresh_measurements() {

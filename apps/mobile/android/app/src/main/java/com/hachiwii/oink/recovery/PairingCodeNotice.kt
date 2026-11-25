@@ -9,6 +9,7 @@ import android.content.Intent
 import androidx.annotation.MainThread
 import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
+import com.hachiwii.oink.L10n
 import com.hachiwii.oink.MainActivity
 import com.hachiwii.oink.PairingServiceFinder
 import com.hachiwii.oink.R
@@ -117,7 +118,7 @@ object PairingCodeNotice {
     private fun show(context: Context, notice: PairingNotice?, hint: String? = null) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         if (notice == null) { manager.cancel(ID); return }
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "特权模式配对", NotificationManager.IMPORTANCE_HIGH))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, L10n.translate("特权模式配对"), NotificationManager.IMPORTANCE_HIGH))
         val builder = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_oink)
         when (notice) {
             is PairingNotice.Input -> {
@@ -125,22 +126,22 @@ object PairingCodeNotice {
                     // RemoteInput fills in the reply, so the PendingIntent must be mutable; the explicit
                     // component keeps it to our own receiver.
                     PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                val input = RemoteInput.Builder(KEY_CODE).setLabel("六位配对码").build()
-                val text = hint ?: if (notice.retry) "刚才的配对码没有成功。请输入「使用配对码配对设备」显示的新配对码，不用离开「设置」。"
-                    else "请输入「使用配对码配对设备」显示的六位配对码，不用离开「设置」。"
+                val input = RemoteInput.Builder(KEY_CODE).setLabel(L10n.translate("六位配对码")).build()
+                val text = L10n.translate(hint ?: if (notice.retry) "刚才的配对码没有成功。请输入「使用配对码配对设备」显示的新配对码，不用离开「设置」。"
+                    else "请输入「使用配对码配对设备」显示的六位配对码，不用离开「设置」。")
                 // No content intent: opening Oink would leave Settings and close the system's dialog.
-                builder.setContentTitle(if (notice.retry) "重新输入配对码" else "已找到配对服务")
+                builder.setContentTitle(L10n.translate(if (notice.retry) "重新输入配对码" else "已找到配对服务"))
                     .setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
                     .setCategory(NotificationCompat.CATEGORY_MESSAGE).setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setOnlyAlertOnce(hint != null)
-                    .addAction(NotificationCompat.Action.Builder(0, "输入配对码", reply).addRemoteInput(input)
+                    .addAction(NotificationCompat.Action.Builder(0, L10n.translate("输入配对码"), reply).addRemoteInput(input)
                         .setAllowGeneratedReplies(false).build())
             }
-            PairingNotice.Pairing -> builder.setContentTitle("正在配对…").setProgress(0, 0, true).setOngoing(true).setSilent(true)
-            PairingNotice.Paired -> builder.setContentTitle("配对成功").setContentText("正在开启特权模式。")
+            PairingNotice.Pairing -> builder.setContentTitle(L10n.translate("正在配对…")).setProgress(0, 0, true).setOngoing(true).setSilent(true)
+            PairingNotice.Paired -> builder.setContentTitle(L10n.translate("配对成功")).setContentText(L10n.translate("正在开启特权模式。"))
                 .setSilent(true).setAutoCancel(true).setTimeoutAfter(10_000).setContentIntent(openOink(context))
-            is PairingNotice.Failed -> builder.setContentTitle("配对失败").setContentText(notice.message)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(notice.message))
+            is PairingNotice.Failed -> builder.setContentTitle(L10n.translate("配对失败")).setContentText(L10n.translate(notice.message))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(L10n.translate(notice.message)))
                 .setSilent(true).setAutoCancel(true).setContentIntent(openOink(context))
         }
         // Without notification permission this posts nothing; the app's own field still works in split screen.

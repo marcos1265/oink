@@ -150,6 +150,7 @@ struct Dial {
     started: bool,
     // A manual address makes the next attempt a request, not a background retry.
     requested: bool,
+    pub(super) manual_override: Option<SocketAddr>,
     // Keep readiness through close(), which removes the session before Lost.
     ready_link: Option<LinkId>,
 }
@@ -266,6 +267,8 @@ pub(super) struct Owner {
     last_state: Instant,
     displays: Vec<DisplayInfo>,
     displays_observed: bool,
+    #[cfg(windows)]
+    pub(super) require_console_displays: bool,
     display_layout_dependency: Option<(GroupId, dto::ConfigVersion)>,
     detached: detached::DetachedScreens,
     discovery: Option<Arc<Discovery>>,
@@ -609,6 +612,8 @@ impl Owner {
             last_state: Instant::now(),
             displays: vec![],
             displays_observed: false,
+            #[cfg(windows)]
+            require_console_displays: false,
             display_layout_dependency: None,
             detached,
             discovery: None,
@@ -789,6 +794,15 @@ impl Owner {
                 let peer = event.peer_boot;
                 let outbound = event.direction == Direction::Outbound;
                 self.dials.entry(peer.device_id).or_default().active = false;
+                if let Some(target_addr) = self.dials.get(&peer.device_id).and_then(|d| d.manual_override) {
+                    if !outbound && event.remote_address.is_some_and(|r| r.ip() != target_addr.ip()) {
+                        self.links.disconnect(id, Disconnect::Stopping);
+                        return;
+                    }
+                    if let Some(dial) = self.dials.get_mut(&peer.device_id) {
+                        dial.manual_override = None;
+                    }
+                }
                 // A probe reports TLS identity before N0 selects its C0. A
                 // repeated query can resolve on the existing C0 and release it
                 // before this replacement arrives. Do not retain an outgoing
@@ -875,6 +889,15 @@ impl Owner {
                 let dial = self.dials.entry(peer).or_default();
                 dial.last_relayed = matches!(path, LinkPath::Relayed { .. });
                 let now = Instant::now();
+                if dial.requested || dial.manual_override.is_some() {
+                    let override_addr = dial.manual_override;
+                    let requested = dial.requested;
+                    dial.reset(now);
+                    dial.manual_override = override_addr;
+                    dial.requested = requested;
+                    self.tick();
+                    return;
+                }
                 dial.lost(link, now);
                 // Keep an ordinary diagnostic at exponential count intervals;
                 // verbose link records have their own bounded recorder. This
@@ -900,6 +923,7 @@ impl Owner {
             }
             ConfigEvent::DialFailed { peer, reason } => {
                 let dial = self.dials.entry(peer).or_default();
+                dial.manual_override = None;
                 dial.failed(reason, Instant::now());
                 self.fail_connecting(
                     peer,
@@ -1266,10 +1290,12 @@ impl Owner {
                         self.publish().map_err(|_| v2::ErrorCode::StateConflict)?;
                     }
                 }
-                self.shared.emit(ConfigChange::Facts {
-                    device: peer.device_id,
-                    capabilities_changed: changed,
-                });
+                if !telemetry_only {
+                    self.shared.emit(ConfigChange::Facts {
+                        device: peer.device_id,
+                        capabilities_changed: changed,
+                    });
+                }
             }
             Message::ConfigState(state) => {
                 if !self.sessions[&id].ready {
@@ -1554,8 +1580,11 @@ impl Owner {
                 if self.no_outbound_dials {
                     continue;
                 }
-                let addresses = self.member_candidates(peer);
+                let mut addresses = self.member_candidates(peer);
                 let dial = self.dials.entry(peer).or_default();
+                if let Some(override_addr) = dial.manual_override {
+                    addresses = vec![override_addr];
+                }
                 if !dial.due(self.identity.id(), peer, now) {
                     continue;
                 }

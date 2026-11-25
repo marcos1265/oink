@@ -1,22 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Dialog, Icon, Tooltip, toast } from 'oink-ui';
 import type { DialogProps } from 'oink-ui';
-import { api, shell } from '../api/client';
+import { tr } from '../i18n';
+import { api } from '../api/client';
 import { agent, useAgent } from '../api/store';
-import { tr, trNodes } from '../i18n';
 import type { MicrophonePluginStatus } from '../api/types';
 import { PermissionButton } from '../permissions/PermissionRow';
 import { ProgressFill } from '../window/ProgressFill';
 
 export function VirtualMicrophoneDescription({windows}:{windows:boolean}) {
-    return <>
-        <span className="setp__microphone-description">{tr('安装后，在应用中选择 {0}，即可使用其他设备共享的麦克风',windows?'CABLE Output':'Oink Microphone')}</span>
-        {windows&&<span className="setp__microphone-description">{trNodes('使用 VB-CABLE：访问{0}查看许可证条款和捐赠',
-            <a className="setp__microphone-link ok-focusable" href="https://www.vb-cable.com" onClick={event=>{
-                event.preventDefault();
-                void shell.openUrl('https://www.vb-cable.com').catch(()=>agent.fail('unavailable'));
-            }}>{tr('官网')}</a>)}</span>}
-    </>;
+    return <span className="setp__microphone-description">{tr('安装后，在应用中选择 {0}，即可使用其他设备共享的麦克风',windows?'CABLE Output':'Oink Microphone')}</span>;
 }
 
 type Step=NonNullable<MicrophonePluginStatus['step']>;

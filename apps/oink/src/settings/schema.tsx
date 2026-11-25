@@ -64,12 +64,6 @@ export const SECTIONS: SectionMeta[] = [
                 }, get desc() {
                     return tr('在其他设备上操作时，本机不会因为闲置而熄屏、锁屏');
                 }, get keywords() { return tr('休眠 熄屏 锁屏 唤醒 其它设备活动时，本机保持屏幕点亮 其他设备活动时，保持屏幕常亮'); } },
-            { id: 'autoUnlock', get label() { return tr('自动解锁本机'); },
-              get desc() { return tr('本机锁定时，从其它设备移入指针，或其它设备开启“同步解锁其它设备”后被解锁时，自动解锁本机。需要输入登录密码，密码加密储存在本地。'); },
-              get keywords() { return tr('解锁 锁屏 密码 登录 自动登录 自动解锁'); } },
-            { id: 'syncUnlock', get label() { return tr('同步解锁其它设备'); },
-              get desc() { return tr('本机解锁后，同时解锁已开启“自动解锁本机”的其它设备。'); },
-              get keywords() { return tr('解锁 同步解锁 锁屏 一起解锁 全部解锁'); } },
             { id: 'confirmQuit', get label() {
                     return tr('退出前确认');
                 }, get desc() {
@@ -87,14 +81,12 @@ export const SECTIONS: SectionMeta[] = [
                 }, get keywords() { return tr('屏蔽 拉黑 黑名单 拒绝 配对 设备 移除'); } },
             { id: 'version', get label() {
                     return tr('当前版本');
-                }, get keywords() { return tr('版本 更新 升级 检查'); } },
-            { id: 'updates', get label() { return tr('自动检查更新'); }, get desc() { return tr('在后台定时检查新版本并提示升级'); }, get keywords() { return tr('版本 更新 升级 检查 自动 后台 软件更新'); } },
-            { id: 'updateChannel', get label() { return tr('更新频道'); }, get desc() { return tr('测试版会更早收到新版本，可能不够稳定'); }, get keywords() { return tr('频道 更新 测试 beta 正式 稳定'); } },
+                }, get keywords() { return tr('版本'); } },
             { id: 'about', get label() {
                     return tr('关于 Oink');
                 }, get desc() {
-                    return tr('版本、项目主页、开源软件引用');
-                }, get keywords() { return tr('about 关于 版本 开源 许可 github'); } },
+                    return tr('开源软件引用');
+                }, get keywords() { return tr('about 关于 版本 开源 许可'); } },
             { id: 'uninstall', only: 'mac', get label() { return tr('卸载 Oink'); }, get desc() { return tr('移除 Oink 及其数据、权限和系统组件'); }, get keywords() { return tr('卸载 移除 删除 废纸篓 清除 数据 权限 卸载 Oink…'); } },
         ],
     },
@@ -105,7 +97,6 @@ export const SECTIONS: SectionMeta[] = [
         },
         icon: <PaletteIcon />,
         items: [
-            { id: 'hideSponsor', get label() { return tr('隐藏赞助按钮'); }, get desc() { return tr('隐藏标题栏的赞助按钮'); }, get keywords() { return tr('赞助 sponsor hide'); } },
             { id: 'language', get label() {
                     return tr('语言');
                 }, get desc() {
@@ -183,6 +174,10 @@ export const SECTIONS: SectionMeta[] = [
                 }, get desc() {
                     return tr('找不到指针时，快速画圈晃动鼠标，指针会拖出尾迹');
                 }, get keywords() { return tr('指针 光标 找不到 晃动'); } },
+            { id: 'cornerDeadZoneEnabled', only: 'win', get label() { return tr('屏幕角落防误触盲区'); }, get desc() { return tr('靠近显示器四个角落的边缘范围内阻止鼠标跨屏跳转，防止快速甩向关闭按钮时切到另一台设备'); }, get keywords() { return tr('角落 盲区 边缘 防误触 关闭 窗口 dead zone corner'); } },
+            { id: 'cornerDeadZonePx', only: 'win', parent: 'cornerDeadZoneEnabled', get label() { return tr('盲区边缘尺寸'); }, get desc() { return tr('鼠标距离屏幕上下角落该像素范围内不触发跨屏跳转（0–2000 像素）'); }, get keywords() { return tr('角落 盲区 像素 px 尺寸 size'); } },
+            { id: 'requireCtrlToWarp', only: 'win', get label() { return tr('按住 Ctrl 键才允许跨屏'); }, get desc() { return tr('开启后，仅在按住左或右 Ctrl 键移动鼠标时才能跨越屏幕边缘切换到其它设备'); }, get keywords() { return tr('Ctrl 控制 跨屏 按键 防误触 切换'); } },
+            { id: 'independentMouse', only: 'win', get label() { return tr('独立鼠标模式（兼容 Moonlight / 远程桌面）'); }, get desc() { return tr('开启后不锁定或隐藏鼠标光标，并允许 Moonlight、Parsec 等远程桌面软件注入的外部鼠标输入正常移动和点击本机'); }, get keywords() { return tr('独立 光标 鼠标 Moonlight Sunshine Parsec 远程桌面 兼容 隐藏 锁定'); } },
         ],
     },
     {
@@ -303,11 +298,6 @@ export const SECTIONS: SectionMeta[] = [
                 }, get desc() {
                     return tr('把日志和诊断信息打成一个包，反馈问题时附上');
                 }, get keywords() { return tr('诊断包 导出 反馈 日志 诊断包保存位置 文件夹 打开 位置 路径'); } },
-            { id: 'crashReports', get label() {
-                    return tr('上报崩溃记录和性能数据');
-                }, get desc() {
-                    return tr('发生崩溃或卡顿时发送技术信息，帮助改进 Oink；不包含屏幕内容、输入的文字和文件');
-                }, get keywords() { return tr('崩溃 隐私 上报 统计'); } },
             { id: 'latency', get label() {
                     return tr('连接质量');
                 }, get desc() {

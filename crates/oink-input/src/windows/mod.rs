@@ -41,10 +41,11 @@ mod wheel_origin;
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use oink_foundation::Point;
 use oink_foundation::input::{
-    CaptureMode, FeelProfile, InjectEvent, InputPermissions, KeyCode, PermissionState, ScrollUnit,
+    CaptureMode, FeelProfile, InjectEvent, InputPermissions, KeyCode, MouseButton, PermissionState, ScrollUnit,
 };
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
@@ -52,7 +53,8 @@ use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    CURSOR_SHOWING, CURSORINFO, GetCursorInfo, GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use crate::win_actions::{self, GestureMapper, WinAction};
@@ -81,11 +83,54 @@ struct WinInput {
     /// 滚轮小数部分的累积（水平、垂直），单位 1/120 格。
     scroll_acc: Mutex<(f64, f64)>,
     relative_acc: Mutex<(f64, f64)>,
+    held_buttons: AtomicU32,
+    last_move_was_relative: AtomicBool,
     /// Mac 手势 → 快捷键（`win_actions`）。
     gestures: Mutex<GestureMapper>,
     /// 映射为快捷键、仍按着的 Mac 系统功能键：重复的按下不再触发。
     shortcut_keys: Mutex<HashSet<KeyCode>>,
     lock_chord: Mutex<crate::win_lock::LockChord>,
+}
+
+const BUTTON_BIT_LEFT: u32 = 1 << 0;
+const BUTTON_BIT_RIGHT: u32 = 1 << 1;
+const BUTTON_BIT_MIDDLE: u32 = 1 << 2;
+const BUTTON_BIT_BACK: u32 = 1 << 3;
+const BUTTON_BIT_FORWARD: u32 = 1 << 4;
+const RELATIVE_DRAG_BUTTONS: u32 = BUTTON_BIT_RIGHT | BUTTON_BIT_MIDDLE;
+
+fn button_bit(button: MouseButton) -> u32 {
+    match button {
+        MouseButton::Left | MouseButton::Other(0) => BUTTON_BIT_LEFT,
+        MouseButton::Right | MouseButton::Other(1) => BUTTON_BIT_RIGHT,
+        MouseButton::Middle | MouseButton::Other(2) => BUTTON_BIT_MIDDLE,
+        MouseButton::Back | MouseButton::Other(3) => BUTTON_BIT_BACK,
+        MouseButton::Forward | MouseButton::Other(4) => BUTTON_BIT_FORWARD,
+        MouseButton::Other(_) => 0,
+    }
+}
+
+fn should_use_relative_drag(held_mask: u32, cursor_showing: impl FnOnce() -> bool) -> bool {
+    if held_mask == 0 {
+        return false;
+    }
+    // Right/middle drags (Roblox camera orbit, Blender/3D viewport orbit) read
+    // WM_INPUT even while the OS cursor stays visible on Frame 1. Left drags only
+    // switch to relative when the target app hides the cursor (Pointer Lock / 3D
+    // HTML canvas), preserving 1:1 absolute positioning for normal desktop drags
+    // and Oink OLE cross-machine DnD.
+    (held_mask & RELATIVE_DRAG_BUTTONS) != 0 || !cursor_showing()
+}
+
+fn cursor_is_showing() -> bool {
+    let mut info = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: read-only Win32 cursor visibility query with initialized cbSize.
+    unsafe { GetCursorInfo(&mut info) }
+        .map(|()| info.flags.0 & CURSOR_SHOWING.0 != 0)
+        .unwrap_or(true)
 }
 
 /// 执行 Mac 手势 / 系统功能键映射出的动作（`win_actions`）。
@@ -231,6 +276,13 @@ impl InputBackend for WinInput {
         crate::quicker_compat::set_enabled(enabled);
     }
 
+    fn set_independent_mouse(&self, enabled: bool) {
+        hook::set_independent_mouse(enabled);
+        if let Some(hook) = self.hook.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = hook.set_independent_mouse(enabled);
+        }
+    }
+
     fn set_source_foreground(&self, enabled: bool) {
         // The foreground-capture window would be shown on the logon desktop.
         if profile::current().visible_windows {
@@ -253,6 +305,8 @@ impl InputBackend for WinInput {
         oink_winsvc::client::suspend();
         *self.scroll_acc.lock().unwrap_or_else(|e| e.into_inner()) = (0., 0.);
         *self.relative_acc.lock().unwrap_or_else(|e| e.into_inner()) = (0., 0.);
+        self.held_buttons.store(0, Ordering::Release);
+        self.last_move_was_relative.store(false, Ordering::Release);
         self.shortcut_keys.lock().unwrap_or_else(|e| e.into_inner()).clear();
         *self.gestures.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         *self.lock_chord.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
@@ -555,8 +609,29 @@ impl InputBackend for WinInput {
                 pointer_capture::record_motion(x != 0 || y != 0);
                 Ok(())
             }
-            // Windows still injects absolute position; the supplied delta is read-only capture evidence.
             InjectEvent::MoveTo { pos } | InjectEvent::MoveToWithDelta { pos, .. } => {
+                if let InjectEvent::MoveToWithDelta { dx, dy, .. } = event {
+                    let held = self.held_buttons.load(Ordering::Acquire);
+                    if dx.is_finite() && dy.is_finite() && should_use_relative_drag(held, cursor_is_showing) {
+                        let (x, y) = {
+                            let mut acc = self
+                                .relative_acc
+                                .lock()
+                                .map_err(|_| InputError::Platform("relative accumulator poisoned".into()))?;
+                            (inject::take_whole(&mut acc.0, *dx), inject::take_whole(&mut acc.1, *dy))
+                        };
+                        self.last_move_was_relative.store(true, Ordering::Release);
+                        if x != 0 || y != 0 {
+                            send(&[inject::move_relative(x, y)])?;
+                        }
+                        pointer_capture::record_motion(
+                            x != 0 || y != 0 || crate::pointer_capture::windows::nonzero_motion(*dx, *dy),
+                        );
+                        return Ok(());
+                    }
+                }
+                self.last_move_was_relative.store(false, Ordering::Release);
+                *self.relative_acc.lock().unwrap_or_else(|e| e.into_inner()) = (0., 0.);
                 // SAFETY: 读取虚拟桌面范围（本线程 PMv2，物理像素）。
                 let (vx, vy, vw, vh) = unsafe {
                     (
@@ -580,7 +655,17 @@ impl InputBackend for WinInput {
                 Ok(())
             }
             InjectEvent::Button { button, pressed } => {
-                send(&[inject::button(*button, *pressed).ok_or(InputError::Unsupported)?])
+                send(&[inject::button(*button, *pressed).ok_or(InputError::Unsupported)?])?;
+                let bit = button_bit(*button);
+                if bit != 0 {
+                    if *pressed {
+                        self.held_buttons.fetch_or(bit, Ordering::AcqRel);
+                    } else {
+                        self.held_buttons.fetch_and(!bit, Ordering::AcqRel);
+                    }
+                }
+                *self.relative_acc.lock().unwrap_or_else(|e| e.into_inner()) = (0., 0.);
+                Ok(())
             }
             InjectEvent::TouchpadContacts(frame) => {
                 if hook::on_hook_thread() {
@@ -785,6 +870,9 @@ impl InputBackend for WinInput {
         let (InjectEvent::MoveTo { pos } | InjectEvent::MoveToWithDelta { pos, .. }) = event else {
             return None;
         };
+        if matches!(event, InjectEvent::MoveToWithDelta { .. }) && self.last_move_was_relative.load(Ordering::Acquire) {
+            return None;
+        }
         let _dpi = dpi::ThreadDpiGuard::per_monitor_v2();
         // SAFETY: read-only virtual-desktop metrics, no handles or borrowed memory.
         let (x, y, w, h) = unsafe {
@@ -870,5 +958,47 @@ fn session_locked() -> SessionLockObservation {
     SessionLockObservation {
         state: result,
         error_code: None,
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_drag_policy_selects_relative_only_for_right_middle_or_hidden_cursor_drags() {
+        assert!(!should_use_relative_drag(0, || {
+            panic!("cursor visibility must not be queried with no buttons held")
+        }));
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            assert!(should_use_relative_drag(button_bit(button), || {
+                panic!("right/middle drag must not query cursor visibility")
+            }));
+        }
+        assert!(!should_use_relative_drag(button_bit(MouseButton::Left), || true));
+        assert!(should_use_relative_drag(button_bit(MouseButton::Left), || false));
+        assert!(!should_use_relative_drag(button_bit(MouseButton::Back), || true));
+        assert!(should_use_relative_drag(button_bit(MouseButton::Back), || false));
+        assert!(should_use_relative_drag(button_bit(MouseButton::Forward), || false));
+    }
+
+    #[test]
+    fn cursor_injection_target_skips_expected_position_after_relative_drag() {
+        let backend = WinInput::default();
+        let move_with_delta = InjectEvent::MoveToWithDelta {
+            pos: Point::new(100., 200.),
+            dx: 5.,
+            dy: -3.,
+        };
+        let plain_move = InjectEvent::MoveTo {
+            pos: Point::new(100., 200.),
+        };
+
+        backend.last_move_was_relative.store(true, Ordering::Release);
+        assert_eq!(backend.cursor_injection_target(&move_with_delta), None);
+        assert!(backend.cursor_injection_target(&plain_move).is_some());
+
+        backend.last_move_was_relative.store(false, Ordering::Release);
+        assert!(backend.cursor_injection_target(&move_with_delta).is_some());
     }
 }

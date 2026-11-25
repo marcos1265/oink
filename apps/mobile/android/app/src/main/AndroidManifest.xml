@@ -17,7 +17,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Development permission granted by the authorized ADB bootstrap, never by the App itself. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
-    <application android:name=".OinkApplication" android:label="Oink" android:icon="@mipmap/ic_launcher_pink_light" android:roundIcon="@mipmap/ic_launcher_pink_light" android:theme="@style/Theme.Oink" android:allowBackup="true" android:fullBackupContent="@xml/backup_rules" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
+    <application android:name=".OinkApplication" android:label="Oink" android:icon="@mipmap/ic_launcher_pink_light" android:roundIcon="@mipmap/ic_launcher_pink_light" android:theme="@style/Theme.Oink" android:allowBackup="false" android:fullBackupContent="@xml/backup_rules" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
         <!-- adjustNothing: the Compose layout already pads by the IME inset (safeDrawing). Some
              ROMs (MIUI) also resize the window, which lifted the composer twice. -->
         <activity android:name=".MainActivity" android:configChanges="orientation|screenSize" android:windowSoftInputMode="adjustNothing" android:exported="true" />

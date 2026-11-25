@@ -178,6 +178,14 @@ describe('hidden screens mark', () => {
     rerender(row(2, 'offline'));
     expect(container.querySelector('.dev__title .dev__hidden')?.getAttribute('aria-label')).toBe(language === 'en' ? '2 screens hidden' : '2 块屏幕已隐藏');
   });
+  it('shows connected IP badge only on online peer devices', () => {
+    const { container, rerender } = render(<OinkProvider><DeviceItem d={{ ...device, group: 'online', ip: '100.64.0.12' }} now={0} selected={false} collapsed={false} onSelect={() => {}} /></OinkProvider>);
+    expect(container.querySelector('.dev__ip')?.textContent).toBe('100.64.0.12');
+    rerender(<OinkProvider><DeviceItem d={{ ...device, group: 'self', ip: '100.64.0.12' }} now={0} selected={false} collapsed={false} onSelect={() => {}} /></OinkProvider>);
+    expect(container.querySelector('.dev__ip')).toBeNull();
+    rerender(<OinkProvider><DeviceItem d={{ ...device, group: 'offline', ip: '100.64.0.12' }} now={0} selected={false} collapsed={false} onSelect={() => {}} /></OinkProvider>);
+    expect(container.querySelector('.dev__ip')).toBeNull();
+  });
 });
 
 

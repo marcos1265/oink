@@ -111,10 +111,12 @@ impl NodeOptions {
     /// 本机平台的输入、显示器、剪贴板 backend（`OINK_PASTEBOARD` 可让 macOS 改用具名剪贴板）。
     pub fn platform(net: NetworkConfig) -> anyhow::Result<Self> {
         #[cfg(windows)]
-        anyhow::ensure!(
-            oink_winsvc::backend::uiaccess()?,
-            "Windows 后台需要 OinkInput 系统服务提供 UIAccess；请通过已安装的 Oink 打开"
-        );
+        if !oink_foundation::paths::is_portable_mode() {
+            anyhow::ensure!(
+                oink_winsvc::backend::uiaccess()?,
+                "Windows 后台需要 OinkInput 系统服务提供 UIAccess；请通过已安装的 Oink 打开"
+            );
+        }
         let input = oink_input::platform_backend().map_err(|e| anyhow::anyhow!("输入 backend：{e}"))?;
         let display = oink_display::platform_backend().map_err(|e| anyhow::anyhow!("显示器 backend：{e}"))?;
         let displays = display.displays().map_err(|e| anyhow::anyhow!("枚举显示器：{e}"))?;

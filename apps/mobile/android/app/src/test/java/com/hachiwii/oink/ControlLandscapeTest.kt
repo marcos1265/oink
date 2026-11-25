@@ -34,7 +34,7 @@ import org.robolectric.annotation.Config
  * turns the interface to portrait, and the floating keyboard's handle expands, restores and dismisses it.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w893dp-h412dp-land-xxhdpi", application = android.app.Application::class)
+@Config(sdk = [34], qualifiers = "zh-rCN-w893dp-h412dp-land-xxhdpi", application = android.app.Application::class)
 class ControlLandscapeTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private val pc = "a".repeat(64)

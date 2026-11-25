@@ -45,14 +45,7 @@ pub fn manifest_url() -> String {
     )
 }
 pub(crate) fn feed_origin() -> &'static str {
-    #[cfg(feature = "test-feed")]
-    {
-        concat!(env!("OINK_WINDOWS_UPDATE_TEST_FEED"), "/oink-update-qualification")
-    }
-    #[cfg(not(feature = "test-feed"))]
-    {
-        "https://updates.oink.hachiwii.com"
-    }
+    ""
 }
 
 /// Extensible plain-text notes. Language matching is case-insensitive RFC-style

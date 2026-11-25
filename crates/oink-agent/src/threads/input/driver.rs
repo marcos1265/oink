@@ -212,6 +212,7 @@ impl Driver {
         router.set_settings((*settings).clone());
         let native = inject.backend();
         native.set_quicker_compat(settings.quicker_compat);
+        native.set_independent_mouse(settings.independent_mouse);
         let modifier_backend = native.clone();
         router.set_modifier_release_probe(Arc::new(move |mask| modifier_backend.reconcile_passed_modifiers(mask)));
         router.set_local_feel(native.feel_profile());
@@ -342,6 +343,9 @@ impl Driver {
                     // differ in tagging across a toggle without leaving a hold.
                     self.inject.backend().set_quicker_compat(settings.quicker_compat);
                 }
+                if settings.independent_mouse != self.settings.independent_mouse {
+                    self.inject.backend().set_independent_mouse(settings.independent_mouse);
+                }
                 if settings.cursor_trail_duration_ms != self.settings.cursor_trail_duration_ms {
                     self.trail.duration(settings.cursor_trail_duration_ms);
                     let _ = self
@@ -362,15 +366,6 @@ impl Driver {
                 }
             }
             self.settings = settings;
-            let relative = self.adapter.router().game_mode().active
-                && !self.adapter.router().has_pointer_focus()
-                && !self.adapter.router().paused()
-                && !self.adapter.router().mouse_local();
-            if self.relative_capture != relative {
-                self.relative_capture = relative;
-                self.inject
-                    .push_in_epoch(self.input_safety, InjectItem::SetRelativeCapture(relative));
-            }
         }
         let environment = self.snapshots.environment.load();
         if !Arc::ptr_eq(&environment, &self.environment) {
@@ -391,6 +386,21 @@ impl Driver {
                     .set_paused(self.paused || environment.system_sleeping || !self.controllable);
             }
             self.environment = environment;
+        }
+        self.sync_relative_capture();
+    }
+
+    fn sync_relative_capture(&mut self) {
+        let router = self.adapter.router();
+        let relative = router.game_mode().active
+            && !router.has_pointer_focus()
+            && !router.paused()
+            && !router.mouse_local()
+            && !router.mouse_disabled();
+        if self.relative_capture != relative {
+            self.relative_capture = relative;
+            self.inject
+                .push_in_epoch(self.input_safety, InjectItem::SetRelativeCapture(relative));
         }
     }
     fn sync_layout(&mut self, force: bool) {
@@ -1469,12 +1479,7 @@ impl Driver {
             ),
             self.inject.trace.as_deref(),
         );
-        let relative_capture = active && !eligible && !router.paused() && !router.mouse_local();
-        if self.relative_capture != relative_capture {
-            self.relative_capture = relative_capture;
-            self.inject
-                .push_in_epoch(self.input_safety, InjectItem::SetRelativeCapture(relative_capture));
-        }
+        self.sync_relative_capture();
     }
     fn read(&mut self) -> bool {
         if self.cursor.pending.is_some() {
@@ -1941,6 +1946,7 @@ impl Driver {
         {
             self.keyboard_remote = keyboard_remote;
         }
+        self.sync_relative_capture();
         let mut outputs = self.adapter.router_mut().drain_outputs();
         if !outputs.is_empty() {
             self.cursor.revision = self.cursor.revision.wrapping_add(1);
@@ -2696,11 +2702,15 @@ impl CaptureLoop for Driver {
     fn mouse_disabled(&self) -> bool {
         !self.paused && self.adapter.router().mouse_disabled()
     }
+    fn mouse_local(&self) -> bool {
+        self.paused || self.adapter.router().mouse_local()
+    }
     fn keyboard_disabled(&self) -> bool {
         !self.paused && self.adapter.router().keyboard_disabled()
     }
     fn forward_injected_input(&self) -> bool {
-        self.snapshots.settings.load().forward_injected_input
+        let s = self.snapshots.settings.load();
+        !s.independent_mouse && s.forward_injected_input
     }
     fn keyboard_guard_suspended(&self) -> bool {
         // A capturable lock curtain keeps the guard. Secure desktop input is
@@ -2849,6 +2859,7 @@ impl CaptureLoop for Driver {
             }
             self.input_safety = safety;
             self.source_foreground = false;
+            self.relative_capture = false;
             self.adapter
                 .router_mut()
                 .set_input_suspended(self.paused || self.environment.system_sleeping || self.update_hold.is_some());

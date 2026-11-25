@@ -53,6 +53,20 @@ impl Collector {
         Self::start_with_local(executable, root, consent, build, manifest, component, None)
     }
     pub fn start_with_local(
+        _executable: &Path,
+        _root: &Path,
+        _consent: ReportConsent,
+        _build: BuildContext,
+        _manifest: &Manifest,
+        _component: Component,
+        _local: Option<crate::local::Target>,
+    ) -> Result<Self> {
+        // Exterior crash reporting collector is permanently disabled in this local-only build.
+        Err(Error::Disabled)
+    }
+
+    #[allow(dead_code)]
+    pub fn start_with_local_disabled_orig(
         executable: &Path,
         root: &Path,
         consent: ReportConsent,

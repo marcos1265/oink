@@ -293,6 +293,8 @@ struct Task {
     ordering: oink_clipboard::sync::Ordering,
     clock: clock::Clock,
     fault: Option<dto::ResourceFaultCode>,
+    persist_failed: bool,
+    last_persist_retry: Instant,
     history: history::History,
     native_source: Option<content::SourceLease>,
     capture: Option<tokio::task::JoinHandle<()>>,
@@ -499,8 +501,11 @@ impl Task {
     fn persist(&mut self) -> bool {
         if self.shared.history.witness(self.ordering.clock()).is_ok() && self.clock.save(self.ordering.clock()).is_ok()
         {
+            self.persist_failed = false;
             return true;
         }
+        self.persist_failed = true;
+        self.last_persist_retry = Instant::now();
         self.fault = Some(dto::ResourceFaultCode::BackendFailed);
         self.shared.policy.update(false);
         self.shared.receive_policy.update(false);
@@ -515,6 +520,26 @@ impl Task {
             "clipboard identity could not be persisted"
         );
         false
+    }
+    fn retry_persist_recovery(&mut self) {
+        if !self.persist_failed
+            || !self.active()
+            || self.last_persist_retry.elapsed() < Duration::from_secs(5)
+        {
+            return;
+        }
+        self.last_persist_retry = Instant::now();
+        let clock = self.ordering.clock();
+        if self.shared.history.witness(clock).is_ok() && self.clock.save(clock).is_ok() {
+            self.persist_failed = false;
+            self.fault = None;
+            let active = self.active();
+            let settings = *self.shared.settings.lock().unwrap();
+            self.shared.policy.update(active && settings.send);
+            self.shared.receive_policy.update(active && settings.receive);
+            tracing::info!("clipboard persistence recovered; resuming sync");
+            self.reconfigure();
+        }
     }
     fn capture_discard(&self, reason: oink_clipboard::copy_diagnostics::CaptureDiscard, count: u64) {
         oink_clipboard::copy_diagnostics::capture_discard(
@@ -1623,6 +1648,7 @@ impl Task {
             });
         }
         self.echo_base = None;
+        self.persist_failed = false;
         self.cancel_native_write();
         self.fetch_requested = None;
         self.provider_retry = None;

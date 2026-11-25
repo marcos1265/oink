@@ -18,7 +18,10 @@ use oink_protocol::{
         schema::{WireDto, WireValue},
     },
 };
-use std::{collections::HashMap, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 pub(crate) fn start_link_runtime(
     node: Node,
@@ -116,6 +119,8 @@ pub(crate) fn start_link_runtime(
         clock,
         history,
         fault: None,
+        persist_failed: false,
+        last_persist_retry: Instant::now(),
         native_source: None,
         capture: None,
         capture_again: false,
@@ -742,6 +747,13 @@ impl Task {
             self.shared.history.window().records().iter().map(|r| r.id).collect();
         self.capture();
         let mut published = None;
+        let mut last_cap_rev: u64 = 0;
+        let mut last_cap_check = Instant::now();
+        let mut last_pc_members: Option<HashSet<DeviceId>> = None;
+        let mut last_history_rev: Option<u64> = None;
+        let mut last_history_active = self.active();
+        let mut last_reconcile = Instant::now();
+        let mut force_reconcile = true;
         loop {
             let observation = (
                 if self.active() && self.fault.is_none() {
@@ -766,7 +778,7 @@ impl Task {
                 .into_iter()
                 .chain(self.sending().then(|| self.ordering.deadline()).flatten())
                 .min()
-                .unwrap_or(Instant::now() + Duration::from_millis(500));
+                .unwrap_or(Instant::now() + Duration::from_secs(5));
             tokio::select! {
                 _=stop.changed()=>break,
                 _=wake.notified()=>{},
@@ -775,10 +787,18 @@ impl Task {
                 result=mobile_serving.join_next(),if !mobile_serving.is_empty()=>{
                     if let Some(Ok(result)) = result {
                         self.publish_mobile_share(&node, result, &mut proxy_sources).await;
+                        force_reconcile = true;
                     }
                 },
                 _=maintaining.join_next(),if !maintaining.is_empty()=>{},
                 _=maintenance.tick(),if maintaining.is_empty()=>{
+                    self.retry_persist_recovery();
+                    if self.active() && !self.persist_failed {
+                        let count = self.backend.change_count();
+                        if count != self.observed {
+                            self.observe(count);
+                        }
+                    }
                     mobile_pending.retain(|_, pending: &mut mobile::Pending| pending.expires > Instant::now());
                     proxy_sources.retain(|(path, lease)| {
                         if path.exists() && self.shared.history.proxy_retained(path) { return true; }
@@ -790,6 +810,12 @@ impl Task {
                     let store = self.shared.history.clone();
                     let history_tx = self.tx.clone();
                     let history_group = proxy_group;
+                    let current_rev = store.revision();
+                    let run_cap = current_rev != last_cap_rev || last_cap_check.elapsed() >= Duration::from_secs(60);
+                    if run_cap {
+                        last_cap_rev = current_rev;
+                        last_cap_check = Instant::now();
+                    }
                     let sweep = (Instant::now() >= next_sweep).then(|| {
                         next_sweep = Instant::now() + RETAINED_SWEEP;
                         self.shared.retained.clone()
@@ -801,7 +827,9 @@ impl Task {
                             tracing::debug!(kind = ?error.kind(), "source clipboard retention check deferred");
                         }
                         let _ = store.cleanup();
-                        if let Ok(entries) = store.enforce_cap(oink_clipboard::history::MAX_BYTES) {
+                        if run_cap && let Ok(entries) = store.enforce_cap(oink_clipboard::history::MAX_BYTES)
+                            && !entries.is_empty()
+                        {
                             let _ = history_tx.send(Input::HistoryReady(history_group, entries.into_iter().map(oink_foundation::clipboard_history::HistoryChange::Holder).collect()));
                         }
                         if let Some(retained) = sweep {
@@ -826,29 +854,38 @@ impl Task {
                         }
                         // The owner's pause decision, not its later publication.
                         handle.config_state_changed(&node);
+                        force_reconcile = true;
                     },
                     Some(ConfigChange::Facts{device,capabilities_changed})=>{
                         // A member's device kind is a fact; a phone's first facts make it mobile.
                         self.streams.facts_changed(device,capabilities_changed);
-                        let pcs=group.members().members.iter().filter(|m|!m.is_mobile()).map(|m|m.device).collect();
-                        let _=self.shared.history.retain_pc_holders(&pcs);
+                        let pcs: HashSet<DeviceId> = group.members().members.iter().filter(|m|!m.is_mobile()).map(|m|m.device).collect();
+                        if last_pc_members.as_ref() != Some(&pcs) {
+                            let _=self.shared.history.retain_pc_holders(&pcs);
+                            last_pc_members = Some(pcs);
+                        }
                     },
                     Some(ConfigChange::Members)=>{
-                        let members=group.members().members.iter().filter(|m|!m.is_mobile()).map(|m|m.device).collect();
-                        let _=self.shared.history.retain_pc_holders(&members);
+                        let members: HashSet<DeviceId> = group.members().members.iter().filter(|m|!m.is_mobile()).map(|m|m.device).collect();
+                        if last_pc_members.as_ref() != Some(&members) {
+                            let _=self.shared.history.retain_pc_holders(&members);
+                            last_pc_members = Some(members);
+                        }
+                        force_reconcile = true;
                     },
                     Some(_)=>{},None=>break,
                 },
                 event=port.next()=>match event {
-                    Some(ModuleEvent::LinkReady{link,peer})=>self.streams.link_ready(link,peer),
+                    Some(ModuleEvent::LinkReady{link,peer})=>{self.streams.link_ready(link,peer); force_reconcile = true;},
                     Some(ModuleEvent::LinkLost{link,peer,reason})=>{
                         self.streams.link_lost(link,peer,reason);
                         self.history.disconnected(peer);
                         mobile_pending.retain(|_, pending| pending.link != link);
+                        force_reconcile = true;
                     },
-                    Some(ModuleEvent::Inbound(stream))=>self.streams.inbound(stream),
-                    Some(ModuleEvent::InboundLow(operation))=>self.streams.inbound_low(*operation),
-                    Some(ModuleEvent::StreamClosed{stream,reason})=>self.streams.stream_closed(stream,reason),
+                    Some(ModuleEvent::Inbound(stream))=>{self.streams.inbound(stream); force_reconcile = true;},
+                    Some(ModuleEvent::InboundLow(operation))=>{self.streams.inbound_low(*operation); force_reconcile = true;},
+                    Some(ModuleEvent::StreamClosed{stream,reason})=>{self.streams.stream_closed(stream,reason); force_reconcile = true;},
                     Some(ModuleEvent::ProtocolViolation{..})=>{},
                     Some(ModuleEvent::PathChanged{..})=>{},None=>break,
                 },
@@ -858,8 +895,9 @@ impl Task {
                             oink_clipboard::copy_diagnostics::Stage::CapturedReceived, before, 0, 0,
                         );
                         self.captured(before,result,key,identity);
+                        force_reconcile = true;
                     },
-                    Some(Input::Applied{id,ticket,publication})=>self.applied(id,ticket,publication),
+                    Some(Input::Applied{id,ticket,publication})=>{self.applied(id,ticket,publication); force_reconcile = true;},
                     Some(Input::LocalChange(count))=>if self.active(){self.observe(count);},
                     // A newer change sent its own Reconfigure (see `Shared::generation`).
                     Some(Input::Reconfigure(generation))=>if generation == self.shared.generation.load(Ordering::Acquire) {
@@ -876,12 +914,14 @@ impl Task {
                                 .await.unwrap_or_default();
                             proxy_sources = self.register_mobile_sources(restored);
                         }
+                        force_reconcile = true;
                     },
                     Some(Input::HistoryReady(history_group,changes)) => {
                         if history_group == proxy_group {
                             for change in changes {
                                 if self.active() { self.history.forward(&node,change,None); }
                             }
+                            force_reconcile = true;
                         }
                     },
                     Some(Input::HistoryMaterialized(history_group,inventory,representation,mut reader)) => {
@@ -895,6 +935,7 @@ impl Task {
                                     let _ = tx.send(Input::HistoryReady(history_group,changes));
                                 }
                             });
+                            force_reconcile = true;
                         }
                     },
                     Some(Input::FetchFiles)=>self.fetch(),
@@ -1004,90 +1045,111 @@ impl Task {
                     });
                 }
             }
-            let window = self.shared.history.window();
-            let current_ids: std::collections::HashSet<_> = window.records().iter().map(|r| r.id).collect();
-            // Automatic bytes can finish before their authored metadata delta.
-            // Replay them exactly when the record becomes part of the window.
-            // Store rechecks membership at commit, so a late download cannot
-            // recreate an evicted payload directory.
-            if let Some((_, remote)) = self.shared.native_target.lock().unwrap().as_ref() {
-                let id = remote.inventory().id;
-                if current_ids.contains(&id) && !history_ids.contains(&id) {
-                    remote.replay_materialized();
-                }
-            }
-            let retired = history_ids.difference(&current_ids).copied().collect::<Vec<_>>();
-            for id in retired {
-                self.purge_history_offer(id);
-            }
-            if let Some(offer) = self
-                .ordering
-                .current()
-                .filter(|offer| sensitive_superseded(offer, &window))
-                .cloned()
-                && let Ok(id) = offer.id().and_then(oink_clipboard::wire::local_offer_id)
+            let rev = self.shared.history.revision();
+            let active = self.active();
+            if force_reconcile
+                || last_history_rev != Some(rev)
+                || last_history_active != active
+                || last_reconcile.elapsed() >= Duration::from_secs(30)
             {
-                self.purge_history_offer(id);
-            }
-            history_ids = current_ids;
-            proxy_sources.retain(|(path, lease)| {
-                if self.shared.history.proxy_retained(path) {
-                    true
-                } else {
-                    lease.cancel();
-                    false
-                }
-            });
-            if let Some(max) = window.records().first().map(|r| r.clock)
-                && self.ordering.witness_clock(max)
-            {
-                self.persist();
-            }
-            self.streams
-                .set_history_summary(self.history.summary(proxy_group), false);
-            if self.active() {
-                for record in window.records() {
-                    let scope = self.shared.history.scope(record.id);
-                    if scope.0 != 0
-                        && let Ok(Some(entry)) = self.shared.history.holder(
-                            record.id,
-                            oink_foundation::clipboard_history::HolderState::Holding,
-                            scope,
-                        )
-                    {
-                        self.history.forward(
-                            &node,
-                            oink_foundation::clipboard_history::HistoryChange::Holder(entry),
-                            None,
-                        );
+                let window = self.shared.history.window();
+                let current_ids: std::collections::HashSet<_> = window.records().iter().map(|r| r.id).collect();
+                // Automatic bytes can finish before their authored metadata delta.
+                // Replay them exactly when the record becomes part of the window.
+                // Store rechecks membership at commit, so a late download cannot
+                // recreate an evicted payload directory.
+                if let Some((_, remote)) = self.shared.native_target.lock().unwrap().as_ref() {
+                    let id = remote.inventory().id;
+                    if current_ids.contains(&id) && !history_ids.contains(&id) {
+                        remote.replay_materialized();
                     }
                 }
-                let owned = self
-                    .shared
-                    .history
-                    .window()
-                    .holders()
-                    .iter()
-                    .filter(|e| {
-                        e.holder == self.me && e.state == oink_foundation::clipboard_history::HolderState::Holding
-                    })
+                let retired = history_ids.difference(&current_ids).copied().collect::<Vec<_>>();
+                for id in retired {
+                    self.purge_history_offer(id);
+                }
+                if let Some(offer) = self
+                    .ordering
+                    .current()
+                    .filter(|offer| sensitive_superseded(offer, &window))
                     .cloned()
-                    .collect::<Vec<_>>();
-                for entry in owned {
-                    if self.shared.history.scope(entry.record_id).0 == 0
-                        && let Ok(Some(entry)) = self.shared.history.holder(
-                            entry.record_id,
-                            oink_foundation::clipboard_history::HolderState::Released,
-                            oink_foundation::clipboard_history::HolderScope(0),
-                        )
-                    {
-                        self.history.forward(
-                            &node,
-                            oink_foundation::clipboard_history::HistoryChange::Holder(entry),
-                            None,
-                        );
+                    && let Ok(id) = offer.id().and_then(oink_clipboard::wire::local_offer_id)
+                {
+                    self.purge_history_offer(id);
+                }
+                history_ids = current_ids;
+                proxy_sources.retain(|(path, lease)| {
+                    if self.shared.history.proxy_retained(path) {
+                        true
+                    } else {
+                        lease.cancel();
+                        false
+                    }
+                });
+                if let Some(max) = window.records().first().map(|r| r.clock)
+                    && self.ordering.witness_clock(max)
+                {
+                    self.persist();
+                }
+                self.streams.set_history_summary(
+                    dto::HistorySummary::from_window(proxy_group, &window, false).expect("valid local window"),
+                    false,
+                );
+                if active {
+                    let mut scopes = HashMap::with_capacity(window.records().len());
+                    for record in window.records() {
+                        let scope = self.shared.history.scope(record.id);
+                        scopes.insert(record.id, scope);
+                        if scope.0 != 0
+                            && let Ok(Some(entry)) = self.shared.history.holder(
+                                record.id,
+                                oink_foundation::clipboard_history::HolderState::Holding,
+                                scope,
+                            )
+                        {
+                            self.history.forward(
+                                &node,
+                                oink_foundation::clipboard_history::HistoryChange::Holder(entry),
+                                None,
+                            );
+                        }
+                    }
+                    let owned = window
+                        .holders()
+                        .iter()
+                        .filter(|e| {
+                            e.holder == self.me && e.state == oink_foundation::clipboard_history::HolderState::Holding
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for entry in owned {
+                        let empty = scopes
+                            .get(&entry.record_id)
+                            .copied()
+                            .unwrap_or_else(|| self.shared.history.scope(entry.record_id))
+                            .0
+                            == 0;
+                        if empty
+                            && let Ok(Some(entry)) = self.shared.history.holder(
+                                entry.record_id,
+                                oink_foundation::clipboard_history::HolderState::Released,
+                                oink_foundation::clipboard_history::HolderScope(0),
+                            )
+                        {
+                            self.history.forward(
+                                &node,
+                                oink_foundation::clipboard_history::HistoryChange::Holder(entry),
+                                None,
+                            );
+                        }
                     }
                 }
+                last_history_rev = Some(self.shared.history.revision());
+                last_history_active = active;
+                last_reconcile = Instant::now();
+                force_reconcile = false;
+            }
+            if active {
                 self.history.flush(&mut self.streams);
             }
             if self.sending() && self.ordering.capture_due(Instant::now()) {

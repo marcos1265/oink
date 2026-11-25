@@ -50,7 +50,7 @@ type Destroy = unsafe extern "system" fn(*mut c_void);
 struct Device {
     handle: *mut c_void,
     inject: Inject,
-    action: Action,
+    action: Option<Action>,
     destroy: Destroy,
     failed: bool,
 }
@@ -72,9 +72,8 @@ impl Device {
                 GetProcAddress(user32, s!("InjectSyntheticPointerInput"))
                     .ok_or(ContactInitError::InjectApiUnavailable)?,
             );
-            let action: Action = std::mem::transmute(
-                GetProcAddress(user32, s!("InjectTouchpadAction")).ok_or(ContactInitError::ActionApiUnavailable)?,
-            );
+            let action: Option<Action> =
+                GetProcAddress(user32, s!("InjectTouchpadAction")).map(|f| std::mem::transmute(f));
             let destroy: Destroy = std::mem::transmute(
                 GetProcAddress(user32, s!("DestroySyntheticPointerDevice"))
                     .ok_or(ContactInitError::DestroyApiUnavailable)?,
@@ -135,10 +134,13 @@ impl Sink for Device {
         ok
     }
     fn stop_inertia(&mut self) {
+        let Some(action) = self.action else {
+            return;
+        };
         // SAFETY: valid owned synthetic device; TA_INERTIA_STOP/END from new API.
         unsafe {
-            let stopped = (self.action)(self.handle, 9) != 0;
-            let ended = (self.action)(self.handle, 10) != 0;
+            let stopped = action(self.handle, 9) != 0;
+            let ended = action(self.handle, 10) != 0;
             self.failed |= !stopped || !ended;
         }
     }

@@ -160,6 +160,10 @@ pub fn run_worker() -> Result<(), Error> {
     worker::run()
 }
 
+pub(super) fn launch_error() -> Option<&'static str> {
+    None
+}
+
 pub(super) fn input_allowed() -> bool {
     if !pending() {
         return true;
