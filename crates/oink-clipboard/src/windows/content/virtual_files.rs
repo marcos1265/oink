@@ -646,69 +646,77 @@ fn descriptors(data: &IDataObject) -> io::Result<Option<Vec<Descriptor>>> {
         if unsafe { data.QueryGetData(&format) } != windows::Win32::Foundation::S_OK {
             continue;
         }
-        // SAFETY: the caller owns data on this apartment; medium is released below.
-        let mut medium = unsafe { data.GetData(&format) }.map_err(|_| failed())?;
-        let bytes = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
-            // SAFETY: tymed has been checked and the medium is still owned here.
-            unsafe { medium::global(medium.u.hGlobal) }
-        } else {
-            Err(failed())
-        };
-        // SAFETY: GetData transferred this medium to us; release once on both paths.
-        unsafe {
-            ReleaseStgMedium(&mut medium);
-        }
-        let bytes = bytes?;
-        if bytes.len() < 4 || bytes.len() > INVENTORY_BYTES {
-            return Err(content::unavailable(Unavailable::LimitExceeded));
-        }
-        let count = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        if count > 65535 || 4 + count * stride > bytes.len() {
-            return Err(content::unavailable(Unavailable::InvalidData));
-        }
-        let mut descriptors = Vec::with_capacity(count);
-        for entry in bytes[4..4 + count * stride].chunks_exact(stride) {
-            let u32_at = |offset| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
-            let flags = u32_at(0);
-            let name = if wide {
-                let units: Vec<_> = entry[72..]
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                    .collect();
-                let end = units.iter().position(|u| *u == 0).ok_or_else(failed)?;
-                String::from_utf16(&units[..end]).map_err(|_| failed())?
+        let parsed: io::Result<Vec<Descriptor>> = (|| {
+            // SAFETY: the caller owns data on this apartment; medium is released below.
+            let mut medium = unsafe { data.GetData(&format) }.map_err(|_| failed())?;
+            let bytes = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                // SAFETY: tymed has been checked and the medium is still owned here.
+                unsafe { medium::global(medium.u.hGlobal) }
             } else {
-                let end = entry[72..].iter().position(|b| *b == 0).ok_or_else(failed)?;
-                super::super::ansi_to_string(&entry[72..72 + end])
-            }
-            .replace('\\', "/");
-            let directory = flags & 4 != 0 && u32_at(36) & 0x10 != 0;
-            let size = if !directory && flags & 0x40 != 0 {
-                ContentSize::Known(((u32_at(64) as u64) << 32) | u32_at(68) as u64)
-            } else {
-                ContentSize::Unknown
+                Err(failed())
             };
-            let modified_ms = (flags & 0x20 != 0).then(|| {
-                let ticks = ((u32_at(60) as u64) << 32) | u32_at(56) as u64;
-                ((ticks as i128 / 10_000) - 11_644_473_600_000).clamp(i64::MIN as i128, i64::MAX as i128) as i64
-            });
-            descriptors.push(Descriptor {
-                path: name,
-                directory,
-                size,
-                modified_ms,
-                wide: wide.then(|| descriptor_header(entry)),
-                ansi: (!wide).then(|| {
-                    let mut ansi = descriptor_header(entry);
-                    ansi.resize(332, 0);
-                    let end = entry[72..].iter().position(|byte| *byte == 0).unwrap();
-                    ansi[72..72 + end].copy_from_slice(&entry[72..72 + end]);
-                    ansi
-                }),
-            });
-        }
+            // SAFETY: GetData transferred this medium to us; release once on both paths.
+            unsafe {
+                ReleaseStgMedium(&mut medium);
+            }
+            let bytes = bytes?;
+            if bytes.len() < 4 || bytes.len() > INVENTORY_BYTES {
+                return Err(content::unavailable(Unavailable::LimitExceeded));
+            }
+            let count = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            if count > 65535 || 4 + count * stride > bytes.len() {
+                return Err(content::unavailable(Unavailable::InvalidData));
+            }
+            let mut descriptors = Vec::with_capacity(count);
+            for entry in bytes[4..4 + count * stride].chunks_exact(stride) {
+                let u32_at = |offset| u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap());
+                let flags = u32_at(0);
+                let name = if wide {
+                    let units: Vec<_> = entry[72..]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                        .collect();
+                    let end = units.iter().position(|u| *u == 0).ok_or_else(failed)?;
+                    String::from_utf16(&units[..end]).map_err(|_| failed())?
+                } else {
+                    let end = entry[72..].iter().position(|b| *b == 0).ok_or_else(failed)?;
+                    super::super::ansi_to_string(&entry[72..72 + end])
+                }
+                .replace('\\', "/");
+                let directory = flags & 4 != 0 && u32_at(36) & 0x10 != 0;
+                let size = if !directory && flags & 0x40 != 0 {
+                    ContentSize::Known(((u32_at(64) as u64) << 32) | u32_at(68) as u64)
+                } else {
+                    ContentSize::Unknown
+                };
+                let modified_ms = (flags & 0x20 != 0).then(|| {
+                    let ticks = ((u32_at(60) as u64) << 32) | u32_at(56) as u64;
+                    ((ticks as i128 / 10_000) - 11_644_473_600_000).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+                });
+                descriptors.push(Descriptor {
+                    path: name,
+                    directory,
+                    size,
+                    modified_ms,
+                    wide: wide.then(|| descriptor_header(entry)),
+                    ansi: (!wide).then(|| {
+                        let mut ansi = descriptor_header(entry);
+                        ansi.resize(332, 0);
+                        let end = entry[72..].iter().position(|byte| *byte == 0).unwrap();
+                        ansi[72..72 + end].copy_from_slice(&entry[72..72 + end]);
+                        ansi
+                    }),
+                });
+            }
+            Ok(descriptors)
+        })();
+        let descriptors = match parsed {
+            Ok(descriptors) => descriptors,
+            Err(_) if combined.is_some() => continue,
+            Err(error) => return Err(error),
+        };
         if let Some(previous) = &mut combined {
             if previous.len() != descriptors.len()
                 || previous

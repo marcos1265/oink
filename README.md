@@ -19,6 +19,7 @@ Oink, short for "Oink Is Not only a KVM", is modern software that builds a peer-
 - **Windows & Desktop**:
   - **Portable Mode**: Place a `portable.txt` file next to the executable to store configuration, caches, and logs inside a local `./data` directory.
   - **Input & Pointer Improvements**: Added configurable corner dead zones and an optional hold-Ctrl modifier to prevent accidental cross-screen jumps near screen edges. Added an independent mouse mode to keep the local cursor unlocked and visible alongside external injected pointer input from remote desktop software. Fixed cursor-warping / camera-orbit jumps when dragging inside cursor-captured 3D applications.
+  - **Cross-Screen Drag & Drop**: Fixed cross-screen dragging of text and links on Windows, including drags offering link/move operations, drags near screen corners or with hold-Ctrl enabled, and drags carrying secondary virtual-file descriptors.
   - **Service & Compatibility Updates**: Refined Windows background service startup handling/visibility and extended local clipboard & compatibility controls.
 - **Android**:
   - **Multi-Language Support**: Full runtime localization in English, Simplified Chinese, Japanese, and Korean across the app, Settings, persistent notifications, Quick Settings tiles, and error toasts (with shorter, deduplicated, tap-to-dismiss toasts).

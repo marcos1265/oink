@@ -2203,11 +2203,6 @@ impl Router {
             self.pointer = Some(dst);
             return Disposition::Swallow;
         }
-        if self.edge_warp_blocked(bounds, c, true) {
-            self.resistance = None;
-            self.dnd_off_edge();
-            return Disposition::Pass;
-        }
         if !self.input_ready(dst.screen.device) || self.leave_blocked() {
             self.diagnostic(DecisionKind::Refused, self.refusal_reason(), Some(&dst));
             self.resistance = None;
@@ -2218,6 +2213,11 @@ impl Router {
             } else {
                 self.dnd_off_edge();
             }
+            return Disposition::Pass;
+        }
+        if self.edge_warp_blocked(bounds, c, true) {
+            self.resistance = None;
+            self.dnd_off_edge();
             return Disposition::Pass;
         }
         if !self.push_resistance(me, &cur, prev.as_ref(), &dst, (dx, dy), now) {

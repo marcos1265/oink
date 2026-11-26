@@ -1235,6 +1235,20 @@ pub(super) fn data_object(spec: &DragSpec) -> Result<(IDataObject, Arc<vfile::Sh
         .map(super::content::target::build_drag)
         .transpose()
         .map_err(|_| "native drag inventory unavailable".to_string())?;
+    if !with_files
+        && cloud.is_none()
+        && !spec.items.iter().any(|i| matches!(i, ClipData::Files(_)))
+        && (spec.ops.contains(DragOps::LINK)
+            || spec.native.as_ref().is_some_and(|n| {
+                n.inventory
+                    .items
+                    .iter()
+                    .flat_map(|i| &i.representations)
+                    .any(|r| r.standard == Some(crate::model::StandardFormat::Url))
+            }))
+    {
+        effects = DROPEFFECT(effects.0 | DROPEFFECT_LINK.0);
+    }
     let (data, shared) = vfile::build_inner(
         vfile::Spec {
             cloud,
@@ -1425,10 +1439,14 @@ struct Catcher {
     shared: Arc<Shared>,
 }
 
-/// 接收窗口接受时返回的效果：源允许复制就复制，否则取源允许的第一个。
+/// 接收窗口接受时返回的效果：源允许复制就复制，否则依次接受链接、移动。
 fn accept_effect(allowed: DROPEFFECT) -> DROPEFFECT {
     if allowed.0 & DROPEFFECT_COPY.0 != 0 {
         DROPEFFECT_COPY
+    } else if allowed.0 & DROPEFFECT_LINK.0 != 0 {
+        DROPEFFECT_LINK
+    } else if allowed.0 & DROPEFFECT_MOVE.0 != 0 {
+        DROPEFFECT_MOVE
     } else {
         DROPEFFECT_NONE
     }
@@ -1472,7 +1490,16 @@ impl IDropTarget_Impl for Catcher_Impl {
             let Some(operation) = operation else {
                 return Ok(());
             };
+            let reset_report = || {
+                let mut st = self.shared.lock();
+                if st.source_operation == Some(operation) {
+                    st.reported = false;
+                    st.source_operation = None;
+                    st.probe_operation = None;
+                }
+            };
             let Some(data) = pdataobj.as_ref() else {
+                reset_report();
                 return Ok(());
             };
             let started = Instant::now();
@@ -1496,15 +1523,44 @@ impl IDropTarget_Impl for Catcher_Impl {
             };
             let drops = read_drag_paths(data);
             let Ok(mut inventory) = super::content::inventory(data, id) else {
+                reset_report();
                 return Ok(());
             };
+            let virtual_files = if drops.is_empty() {
+                match super::content::virtual_files::Virtual::metadata(data) {
+                    Ok(Some(files)) if !crate::content::namespace::Namespace::roots(files.as_ref()).is_empty() => {
+                        Some(files)
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::debug!(
+                            reason = ?crate::content::reason(&error),
+                            "ignoring unusable drag virtual file metadata"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if drops.is_empty()
+                && virtual_files.is_none()
+                && inventory.items.iter().any(|item| item.file.is_some())
+            {
+                inventory = crate::policy::without_files(inventory);
+            }
             for item in &mut inventory.items {
                 item.virtual_files = item.file.is_some() && drops.is_empty();
+            }
+            if !inventory.items.iter().any(|item| !item.representations.is_empty()) {
+                reset_report();
+                return Ok(());
             }
             representation_trace::inventory(&inventory, operation, false);
             let Ok(source) =
                 crate::content::Deferred::new(inventory.clone(), Arc::new(super::content::WindowsTranslator))
             else {
+                reset_report();
                 return Ok(());
             };
             LOCAL.with(|local| {
@@ -1558,17 +1614,6 @@ impl IDropTarget_Impl for Catcher_Impl {
                     old.fail(crate::model::Unavailable::Superseded);
                 }
             }
-            let virtual_files = if drops.is_empty() {
-                match super::content::virtual_files::Virtual::metadata(data) {
-                    Ok(files) => files,
-                    Err(_) => {
-                        source.fail(crate::model::Unavailable::ReadFailed);
-                        return Ok(());
-                    }
-                }
-            } else {
-                None
-            };
             self.shared.lock().source_virtual = virtual_files.clone();
             let items = crate::content::items(&inventory);
             let report_end = std::time::Instant::now();
@@ -1734,7 +1779,9 @@ impl IDropTarget_Impl for Catcher_Impl {
                 };
                 match (source, root, pdataobj.as_ref()) {
                     (Some(source), Some(root), Some(data)) => {
-                        let id = crate::content::Provider::inventory(source.as_ref()).id;
+                        let offered = crate::content::Provider::inventory(source.as_ref());
+                        let id = offered.id;
+                        let strip_files = offered.items.iter().all(|item| item.file.is_none());
                         let captured = virtual_files
                             .map_or(Ok(()), |files| files.snapshot(data, &root))
                             .or_else(|error| {
@@ -1748,7 +1795,7 @@ impl IDropTarget_Impl for Catcher_Impl {
                                     Err(error)
                                 }
                             })
-                            .and_then(|()| super::content::snapshot(data, &root, id));
+                            .and_then(|()| super::content::snapshot_drag(data, &root, id, strip_files));
                         match captured {
                             Ok(snapshot) => source.complete(snapshot),
                             Err(error) => {
@@ -1917,5 +1964,14 @@ mod diagnostic_tests {
             notify.DragEnterTarget(HWND::default()).unwrap();
             notify.DragLeaveTarget().unwrap();
         }
+    }
+
+    #[test]
+    fn accept_effect_prefers_copy_then_link_then_move() {
+        assert_eq!(accept_effect(DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK), DROPEFFECT_COPY);
+        assert_eq!(accept_effect(DROPEFFECT_LINK | DROPEFFECT_MOVE), DROPEFFECT_LINK);
+        assert_eq!(accept_effect(DROPEFFECT_LINK), DROPEFFECT_LINK);
+        assert_eq!(accept_effect(DROPEFFECT_MOVE), DROPEFFECT_MOVE);
+        assert_eq!(accept_effect(DROPEFFECT_NONE), DROPEFFECT_NONE);
     }
 }

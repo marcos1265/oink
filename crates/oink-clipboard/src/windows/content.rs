@@ -81,97 +81,149 @@ fn is_file(format: &NativeFormat) -> bool {
 }
 
 pub(super) fn inventory(data: &IDataObject, id: OfferId) -> io::Result<Inventory> {
+    let mut representations = Vec::new();
+    let mut enum_ok = false;
     // SAFETY: current apartment owns data. Next allocates ptd; we free each one.
     // Device-specific render targets are explicitly unavailable, not replaced by
     // a guessed display/printer: those device contexts cannot cross machines.
     unsafe {
-        let formats = data
-            .EnumFormatEtc(DATADIR_GET.0 as u32)
-            .map_err(|_| content::unavailable(Unavailable::ReadFailed))?;
-        let mut representations = Vec::new();
-        let mut enumerated = 0;
-        loop {
-            let mut entries = [FORMATETC::default()];
-            let mut n = 0;
-            formats
-                .Next(&mut entries, Some(&mut n))
-                .ok()
-                .map_err(|_| content::unavailable(Unavailable::ReadFailed))?;
-            if n == 0 {
-                break;
-            }
-            let entry = entries[0];
-            let device = !entry.ptd.is_null();
-            if device {
-                CoTaskMemFree(Some(entry.ptd.cast()));
-            }
-            enumerated += 1;
-            if enumerated > MAX_REPRESENTATIONS {
-                return Err(content::unavailable(Unavailable::LimitExceeded));
-            }
-            let Some(format) = name(entry.cfFormat) else {
-                continue;
-            };
-            for bit in [
-                TYMED_HGLOBAL,
-                TYMED_FILE,
-                TYMED_ISTREAM,
-                TYMED_ISTORAGE,
-                TYMED_GDI,
-                TYMED_MFPICT,
-                TYMED_ENHMF,
-            ] {
-                if entry.tymed & bit.0 as u32 == 0 {
-                    continue;
+        if let Ok(formats) = data.EnumFormatEtc(DATADIR_GET.0 as u32) {
+            let mut enumerated = 0;
+            let mut next_ok = true;
+            loop {
+                let mut entries = [FORMATETC::default()];
+                let mut n = 0;
+                if formats.Next(&mut entries, Some(&mut n)).ok().is_err() {
+                    next_ok = false;
+                    break;
                 }
-                let Some(medium) = medium::kind(bit.0 as u32, entry.cfFormat) else {
-                    continue;
-                };
-                if representations.len() >= MAX_REPRESENTATIONS {
+                if n == 0 {
+                    break;
+                }
+                let entry = entries[0];
+                let device = !entry.ptd.is_null();
+                if device {
+                    CoTaskMemFree(Some(entry.ptd.cast()));
+                }
+                enumerated += 1;
+                if enumerated > MAX_REPRESENTATIONS {
                     return Err(content::unavailable(Unavailable::LimitExceeded));
                 }
-                let data = if device {
-                    RepresentationData::Unavailable(Unavailable::Unsupported)
-                } else if is_file(&format) {
-                    RepresentationData::File(NodeId(1))
-                } else {
-                    RepresentationData::Reader {
-                        size: ContentSize::Unknown,
-                    }
+                let Some(format) = name(entry.cfFormat) else {
+                    continue;
                 };
-                representations.push(Representation {
-                    id: RepresentationId(representations.len() as u32 + 1),
-                    standard: standard(&format),
-                    format: format.clone(),
-                    medium,
-                    aspect: entry.dwAspect,
-                    index: entry.lindex,
-                    data,
-                });
+                for bit in [
+                    TYMED_HGLOBAL,
+                    TYMED_FILE,
+                    TYMED_ISTREAM,
+                    TYMED_ISTORAGE,
+                    TYMED_GDI,
+                    TYMED_MFPICT,
+                    TYMED_ENHMF,
+                ] {
+                    if entry.tymed & bit.0 as u32 == 0 {
+                        continue;
+                    }
+                    let Some(medium) = medium::kind(bit.0 as u32, entry.cfFormat) else {
+                        continue;
+                    };
+                    if representations.len() >= MAX_REPRESENTATIONS {
+                        return Err(content::unavailable(Unavailable::LimitExceeded));
+                    }
+                    let data = if device {
+                        RepresentationData::Unavailable(Unavailable::Unsupported)
+                    } else if is_file(&format) {
+                        RepresentationData::File(NodeId(1))
+                    } else {
+                        RepresentationData::Reader {
+                            size: ContentSize::Unknown,
+                        }
+                    };
+                    representations.push(Representation {
+                        id: RepresentationId(representations.len() as u32 + 1),
+                        standard: standard(&format),
+                        format: format.clone(),
+                        medium,
+                        aspect: entry.dwAspect,
+                        index: entry.lindex,
+                        data,
+                    });
+                }
+            }
+            enum_ok = next_ok;
+        }
+        if representations.is_empty() {
+            let fallback_formats = [
+                NativeFormat::WindowsPredefined(15),
+                NativeFormat::WindowsRegistered("FileGroupDescriptorW".into()),
+                NativeFormat::WindowsRegistered("FileGroupDescriptor".into()),
+                NativeFormat::WindowsRegistered("UniformResourceLocatorW".into()),
+                NativeFormat::WindowsRegistered("UniformResourceLocator".into()),
+                NativeFormat::WindowsRegistered("text/x-moz-url".into()),
+                NativeFormat::WindowsRegistered("HTML Format".into()),
+                NativeFormat::WindowsRegistered("Rich Text Format".into()),
+                NativeFormat::WindowsPredefined(13),
+                NativeFormat::WindowsPredefined(1),
+                NativeFormat::WindowsRegistered("PNG".into()),
+                NativeFormat::WindowsPredefined(17),
+                NativeFormat::WindowsPredefined(8),
+            ];
+            for format in fallback_formats {
+                let Some(cf) = format_id(&format) else {
+                    continue;
+                };
+                let fe = FORMATETC {
+                    cfFormat: cf,
+                    ptd: std::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                };
+                if data.QueryGetData(&fe) == windows::Win32::Foundation::S_OK {
+                    let rep_data = if is_file(&format) {
+                        RepresentationData::File(NodeId(1))
+                    } else {
+                        RepresentationData::Reader {
+                            size: ContentSize::Unknown,
+                        }
+                    };
+                    representations.push(Representation {
+                        id: RepresentationId(representations.len() as u32 + 1),
+                        standard: standard(&format),
+                        format,
+                        medium: Medium::HGlobal,
+                        aspect: DVASPECT_CONTENT.0,
+                        index: -1,
+                        data: rep_data,
+                    });
+                }
             }
         }
-        let file = representations
-            .iter()
-            .any(|r| matches!(r.data, RepresentationData::File(_)))
-            .then_some(NodeId(1));
-        let virtual_files = file.is_some()
-            && !representations
-                .iter()
-                .any(|rep| rep.format == NativeFormat::WindowsPredefined(15));
-        let inventory = Inventory {
-            roots: Vec::new(),
-            id,
-            platform: ClipPlatform::Windows,
-            items: vec![ContentItem {
-                virtual_files,
-                id: ItemId(0),
-                file,
-                representations,
-            }],
-        };
-        inventory.validate().map_err(content::unavailable)?;
-        Ok(inventory)
     }
+    if !enum_ok && representations.is_empty() {
+        return Err(content::unavailable(Unavailable::ReadFailed));
+    }
+    let file = representations
+        .iter()
+        .any(|r| matches!(r.data, RepresentationData::File(_)))
+        .then_some(NodeId(1));
+    let virtual_files = file.is_some()
+        && !representations
+            .iter()
+            .any(|rep| rep.format == NativeFormat::WindowsPredefined(15));
+    let inventory = Inventory {
+        roots: Vec::new(),
+        id,
+        platform: ClipPlatform::Windows,
+        items: vec![ContentItem {
+            virtual_files,
+            id: ItemId(0),
+            file,
+            representations,
+        }],
+    };
+    inventory.validate().map_err(content::unavailable)?;
+    Ok(inventory)
 }
 pub(super) fn read_representation(data: &IDataObject, rep: &Representation) -> io::Result<Vec<u8>> {
     let cf = format_id(&rep.format).ok_or_else(|| content::unavailable(Unavailable::InvalidData))?;
@@ -199,7 +251,19 @@ pub(super) fn read_representation(data: &IDataObject, rep: &Representation) -> i
     }
 }
 pub(super) fn snapshot(data: &IDataObject, root: &Path, id: OfferId) -> io::Result<Arc<dyn Provider>> {
+    snapshot_drag(data, root, id, false)
+}
+
+pub(super) fn snapshot_drag(
+    data: &IDataObject,
+    root: &Path,
+    id: OfferId,
+    strip_files: bool,
+) -> io::Result<Arc<dyn Provider>> {
     let mut inventory = inventory(data, id)?;
+    if strip_files {
+        inventory = crate::policy::without_files(inventory);
+    }
     let batch = Batch::create(root, StoreKind::SourceSnapshot, BatchId::random()?)?;
     for rep in inventory.items.iter_mut().flat_map(|item| &mut item.representations) {
         if !matches!(rep.data, RepresentationData::Reader { .. }) {
