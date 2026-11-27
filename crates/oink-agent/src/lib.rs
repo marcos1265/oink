@@ -19,6 +19,7 @@ mod connection_quality;
 pub mod device_cards;
 pub mod device_controls;
 mod dnd;
+pub mod dwc_bridge;
 mod event_delivery;
 #[cfg(target_os = "macos")]
 mod file_provider;

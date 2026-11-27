@@ -40,6 +40,7 @@ fn state_key(command: &InputCommand) -> Option<StateKey> {
         Hotkeys(_) => 12,
         EventFrequency(_) => 13,
         DndAvailable(_) => 14,
+        DwcBridgeActive(_) => 26,
         // Shutdown must remain deliverable even when action admission is exhausted.
         Stop => 15,
         PeerFacts { boot, .. } => return Some((16, Some(boot.device_id))),
@@ -110,6 +111,7 @@ impl Clone for StateCommand {
             Hotkeys(v) => Hotkeys(v.clone()),
             EventFrequency(v) => EventFrequency(*v),
             DndAvailable(v) => DndAvailable(*v),
+            DwcBridgeActive(v) => DwcBridgeActive(*v),
             Stop => Stop,
             PeerFacts {
                 boot,

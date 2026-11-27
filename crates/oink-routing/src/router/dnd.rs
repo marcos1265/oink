@@ -307,10 +307,40 @@ pub(super) struct Dnd {
     pub(super) press_origin: Option<ScreenPos>,
     preview_requested: Option<(DeviceId, ClipId, u64, PreviewBinding)>,
     crossing_evidence: Option<(ScreenPos, (f64, f64), bool)>,
+    pub(super) dwc_window_drag_bridge: bool,
     pub(super) outgoing: Option<Outgoing>,
 }
 
+/// Live edge-push progress exposed for external window-drag bridge integration (DWC).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DwcBezelPush {
+    pub at: Point,
+    pub normal: (f64, f64),
+    pub crossed_threshold: bool,
+    pub has_ole_content: bool,
+}
+
 impl Router {
+    pub fn set_dwc_window_drag_bridge(&mut self, active: bool) {
+        self.dnd.dwc_window_drag_bridge = active;
+    }
+
+    pub fn dwc_window_drag_bridge_active(&self) -> bool {
+        self.dnd.dwc_window_drag_bridge
+    }
+
+    pub fn dwc_bezel_push(&self) -> Option<DwcBezelPush> {
+        let State::Probing { gesture, content, .. } = &self.dnd.state else {
+            return None;
+        };
+        let threshold = self.cfg.settings.dnd_push_fraction;
+        Some(DwcBezelPush {
+            at: gesture.at,
+            normal: gesture.edge.normal,
+            crossed_threshold: gesture.crossed(threshold),
+            has_ole_content: content.is_some(),
+        })
+    }
     /// Failure-only inspection for integration watchdogs; never includes offer payloads.
     #[cfg(debug_assertions)]
     pub fn dnd_watchdog_snapshot_for_test(&self) -> String {
@@ -4487,5 +4517,147 @@ mod connection_tests {
             7,
         );
         assert!(r.out.iter().any(|o| matches!(o, Output::Dnd(DndCmd::UpdateImage { id: found, epoch: 3, image }) if *found == id && image == &preview_image(2.))));
+    }
+
+    #[test]
+    fn dwc_window_drag_bridge_off_keeps_non_ole_push_local_while_reporting_state() {
+        use crate::layout::ScreenId;
+        use oink_foundation::{Rect, display::DisplayInfo};
+
+        let me = DeviceId([1; 32]);
+        let peer = DeviceId([2; 32]);
+        let bounds = Rect::new(0., 0., 1000., 600.);
+        let mut layout = crate::SimpleLayout::new();
+        layout.add_screen(
+            ScreenId::new(me, "screen"),
+            bounds,
+            Rect::new(0., 0., 1000. / 686., 600. / 686.),
+        );
+        layout.add_screen(
+            ScreenId::new(peer, "screen"),
+            bounds,
+            Rect::new(0., 620. / 686., 1000. / 686., 600. / 686.),
+        );
+        let mut r = Router::new(
+            RouterConfig::new(
+                oink_foundation::session::Boot {
+                    device_id: me,
+                    nonce: [me.0[0]; 16],
+                },
+                "local",
+                Os::Windows,
+            ),
+            Arc::new(layout),
+        );
+        r.set_local_displays(vec![DisplayInfo {
+            key: "screen".into(),
+            name: "screen".into(),
+            bounds,
+            pixel_width: 1000,
+            pixel_height: 600,
+            reference_extent: None,
+            rotation_deg: 0,
+            is_primary: true,
+            is_builtin: false,
+            is_virtual: false,
+        }]);
+        r.set_dnd_available(true);
+        r.test_message(peer, Message::Dnd(DndMsg::Caps { enabled: true }), 1);
+        r.peers.get_mut(&peer).unwrap().focus_ready = true;
+        r.buttons.insert(MouseButton::Left, Target::Local);
+
+        assert!(!r.dwc_window_drag_bridge_active());
+        r.out.clear();
+        r.local_motion(0., 60., Some(Point::new(400., 600.)), 2);
+
+        let push = r.dwc_bezel_push().expect("probing push active");
+        assert!(push.crossed_threshold);
+        assert!(!push.has_ole_content);
+        assert_eq!(r.current_target(), Target::Local);
+        assert!(!r.out.iter().any(|o| matches!(o, Output::Dnd(DndCmd::Unprobe))));
+    }
+
+    #[test]
+    fn dwc_window_drag_bridge_hands_off_on_threshold_without_ole_and_preserves_ole_path() {
+        use crate::layout::ScreenId;
+        use oink_foundation::{Rect, display::DisplayInfo, input::Disposition};
+
+        let make_router = || {
+            let me = DeviceId([1; 32]);
+            let peer = DeviceId([2; 32]);
+            let bounds = Rect::new(0., 0., 1000., 600.);
+            let mut layout = crate::SimpleLayout::new();
+            layout.add_screen(
+                ScreenId::new(me, "screen"),
+                bounds,
+                Rect::new(0., 0., 1000. / 686., 600. / 686.),
+            );
+            layout.add_screen(
+                ScreenId::new(peer, "screen"),
+                bounds,
+                Rect::new(0., 620. / 686., 1000. / 686., 600. / 686.),
+            );
+            let mut r = Router::new(
+                RouterConfig::new(
+                    oink_foundation::session::Boot {
+                        device_id: me,
+                        nonce: [me.0[0]; 16],
+                    },
+                    "local",
+                    Os::Windows,
+                ),
+                Arc::new(layout),
+            );
+            r.set_local_displays(vec![DisplayInfo {
+                key: "screen".into(),
+                name: "screen".into(),
+                bounds,
+                pixel_width: 1000,
+                pixel_height: 600,
+                reference_extent: None,
+                rotation_deg: 0,
+                is_primary: true,
+                is_builtin: false,
+                is_virtual: false,
+            }]);
+            r.set_dnd_available(true);
+            r.test_message(peer, Message::Dnd(DndMsg::Caps { enabled: true }), 1);
+            r.peers.get_mut(&peer).unwrap().focus_ready = true;
+            r.buttons.insert(MouseButton::Left, Target::Local);
+            r.set_dwc_window_drag_bridge(true);
+            (r, me, peer)
+        };
+
+        // Case 1: below dnd_push_fraction stays local, crossing threshold hands off + unprobes
+        let (mut r1, _, peer1) = make_router();
+        assert_eq!(
+            r1.local_motion(0., 2., Some(Point::new(400., 600.)), 2),
+            Disposition::Pass
+        );
+        assert_eq!(r1.current_target(), Target::Local);
+        r1.out.clear();
+        assert_eq!(
+            r1.local_motion(0., 60., Some(Point::new(400., 600.)), 3),
+            Disposition::Swallow
+        );
+        assert_eq!(r1.current_target(), Target::Remote(peer1));
+        assert!(r1.out.iter().any(|o| matches!(o, Output::Dnd(DndCmd::Unprobe))));
+
+        // Case 2: active OLE Detected drag continues normal OLE State::Leaving instead of raw handoff
+        let (mut r2, me2, _) = make_router();
+        r2.local_motion(0., 2., Some(Point::new(400., 600.)), 2);
+        let id = ClipId {
+            origin: me2,
+            seq: DND_SEQ_BIT | 1,
+        };
+        r2.on_dnd_event(DndEvent::Detected {
+            id,
+            items: vec![ClipData::Text("drag".into())],
+        });
+        assert_eq!(r2.dnd_state_name(), "ready");
+        r2.out.clear();
+        r2.local_motion(0., 60., Some(Point::new(400., 600.)), 3);
+        assert_eq!(r2.dnd_state_name(), "leaving");
+        assert!(!r2.out.iter().any(|o| matches!(o, Output::Dnd(DndCmd::Unprobe))));
     }
 }

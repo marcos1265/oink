@@ -79,8 +79,8 @@ mod trail;
 mod volume_diagnostics;
 pub use button_diagnostics::{ButtonHold, ButtonRefusal, ButtonSourcePress};
 pub use dnd::{
-    DndCmd, DndEvent, DndIntegrity, DndPreparation, DndSourceEffect, DndTarget, IntegrityOutcome, NativeObservation,
-    PhysicalObservation, RolePartition, SourcePhase,
+    DndCmd, DndEvent, DndIntegrity, DndPreparation, DndSourceEffect, DndTarget, DwcBezelPush, IntegrityOutcome,
+    NativeObservation, PhysicalObservation, RolePartition, SourcePhase,
 };
 use resistance::Resistance;
 pub use volume_diagnostics::{VolumeAction, VolumeDecision, VolumeDestination, VolumeOriginKind};
@@ -2209,7 +2209,22 @@ impl Router {
             if self.handoff_blocked() {
                 // 拖动中推边：有系统拖拽就接住它交过去。
                 let at = cur.local;
-                self.dnd_push(me, &cur, dst, delta, at);
+                let bridge_can_cross = self.dnd.dwc_window_drag_bridge
+                    && self.input_ready(dst.screen.device)
+                    && !self.paused
+                    && !(self.game_mode().active && !self.pointer_lock_escape_held())
+                    && !(self.locked() && !self.pointer_lock_escape_held())
+                    && !self.system_clip_blocks_exit();
+                self.dnd_push(me, &cur, dst.clone(), delta, at);
+                if bridge_can_cross
+                    && self
+                        .dwc_bezel_push()
+                        .is_some_and(|push| !push.has_ole_content && push.crossed_threshold)
+                {
+                    self.dnd_off_edge();
+                    self.hand_off(dst, self.trail_pointer());
+                    return Disposition::Swallow;
+                }
             } else {
                 self.dnd_off_edge();
             }

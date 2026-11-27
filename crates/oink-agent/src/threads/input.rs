@@ -189,6 +189,7 @@ pub enum InputCommand {
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     DndAvailable(bool),
+    DwcBridgeActive(bool),
     DndItems {
         incomplete: bool,
         peer: DeviceId,

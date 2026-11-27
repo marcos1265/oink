@@ -67,6 +67,7 @@ pub(crate) struct DndGlue {
     source_origin: Mutex<Option<(ClipId, oink_foundation::Point)>>,
     source_releases: Mutex<Option<(ClipId, Result<(), String>)>>,
     hold_observations: Mutex<HashMap<DragOperation, (ClipId, bool)>>,
+    pub(crate) dwc_bridge: crate::dwc_bridge::DwcBridgeHandle,
 }
 
 impl DndGlue {
@@ -1165,10 +1166,13 @@ impl DndGlue {
             }
             DndCmd::Probe { at } => {
                 self.backend.probe(at);
+                self.dwc_bridge
+                    .notify_probe(at.x.round() as i32, at.y.round() as i32);
                 Vec::new()
             }
             DndCmd::Unprobe => {
                 self.backend.unprobe();
+                self.dwc_bridge.notify_unprobe();
                 let mut local = self.local.lock().unwrap();
                 local.retain(|_, drag| drag.owned);
                 Vec::new()

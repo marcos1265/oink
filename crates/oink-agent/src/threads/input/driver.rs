@@ -1284,6 +1284,9 @@ impl Driver {
                 self.adapter.router_mut().on_dnd_event(event);
             }
             InputCommand::DndAvailable(available) => self.adapter.router_mut().set_dnd_available(available),
+            InputCommand::DwcBridgeActive(active) => {
+                self.adapter.router_mut().set_dwc_window_drag_bridge(active);
+            }
             InputCommand::DndItems {
                 peer,
                 stream,

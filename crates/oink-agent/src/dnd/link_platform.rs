@@ -17,6 +17,17 @@ impl super::link::Handle {
         *files.input.lock().unwrap() = Some(input.clone());
         backend.set_content_store(node.cache_dir());
         files.set_paused(node.link_config()?.applied().paused);
+        let bridge_input = input.clone();
+        let dwc_bridge = if cfg!(test) {
+            crate::dwc_bridge::DwcBridgeHandle::disabled()
+        } else {
+            crate::dwc_bridge::DwcBridgeHandle::start(
+                crate::dwc_bridge::DEFAULT_DWC_PIPE_NAME,
+                Some(Arc::new(move |active| {
+                    bridge_input.send(crate::threads::input::InputCommand::DwcBridgeActive(active));
+                })),
+            )
+        };
         let glue = Arc::new(DndGlue {
             me: node.id(),
             data_dir: node.cache_dir(),
@@ -43,6 +54,7 @@ impl super::link::Handle {
             source_origin: Mutex::new(None),
             source_releases: Mutex::new(None),
             hold_observations: Mutex::new(HashMap::new()),
+            dwc_bridge,
         });
         let weak = Arc::downgrade(&glue);
         let sink_input = input.clone();

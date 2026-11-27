@@ -31,9 +31,9 @@ pub use hotkey::{Chord, ChordError, HotkeyBinding, Hotkeys, Mods};
 pub use layout::{LayoutQuery, ScreenId, ScreenPos, StepResult};
 pub use router::keyboard::{KEYBOARD_RELEASE_HOLD_US, KEYBOARD_RELEASE_KEYS};
 pub use router::{
-    Delivery, DndCmd, DndEvent, DndIntegrity, DndPreparation, DndSourceEffect, DndTarget, FocusInfo, FocusLockError,
-    GameMode, GameModeStatus, GroupFocusStatus, MemberInput, Micros, Output, PointerBase, PointerCaptureObservation,
-    Router, StatusEvent,
+    Delivery, DndCmd, DndEvent, DndIntegrity, DndPreparation, DndSourceEffect, DndTarget, DwcBezelPush, FocusInfo,
+    FocusLockError, GameMode, GameModeStatus, GroupFocusStatus, MemberInput, Micros, Output, PointerBase,
+    PointerCaptureObservation, Router, StatusEvent,
 };
 pub use simple_layout::{SimpleLayout, SimpleScreen};
 
