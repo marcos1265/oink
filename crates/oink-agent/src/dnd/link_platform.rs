@@ -21,10 +21,11 @@ impl super::link::Handle {
         let dwc_bridge = if cfg!(test) {
             crate::dwc_bridge::DwcBridgeHandle::disabled()
         } else {
-            crate::dwc_bridge::DwcBridgeHandle::start(
+            crate::dwc_bridge::DwcBridgeHandle::start_with_callbacks(
                 crate::dwc_bridge::DEFAULT_DWC_PIPE_NAME,
-                Some(Arc::new(move |active| {
-                    bridge_input.send(crate::threads::input::InputCommand::DwcBridgeActive(active));
+                None,
+                Some(Arc::new(move |dragging_window| {
+                    bridge_input.send(crate::threads::input::InputCommand::DwcBridgeActive(dragging_window));
                 })),
             )
         };

@@ -219,6 +219,25 @@ pub fn query_active_dragged_window() -> Option<(u64, WindowRect)> {
     None
 }
 
+#[cfg(windows)]
+fn query_cursor_pos() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT::default();
+    // SAFETY: `pt` is a stack-allocated Win32 POINT out-parameter.
+    if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+        (pt.x, pt.y)
+    } else {
+        (0, 0)
+    }
+}
+
+#[cfg(not(windows))]
+fn query_cursor_pos() -> (i32, i32) {
+    (0, 0)
+}
+
 #[derive(Debug)]
 enum WorkerCmd {
     Probe {
@@ -255,6 +274,14 @@ impl DwcBridgeHandle {
     }
 
     pub fn start(pipe_name: impl Into<String>, on_connected_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>) -> Self {
+        Self::start_with_callbacks(pipe_name, on_connected_changed, None)
+    }
+
+    pub fn start_with_callbacks(
+        pipe_name: impl Into<String>,
+        on_connected_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+        on_window_drag_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    ) -> Self {
         let pipe_name = pipe_name.into();
         let connected = Arc::new(AtomicBool::new(false));
         let policy = Arc::new(Mutex::new(DwcPolicy::default()));
@@ -265,7 +292,14 @@ impl DwcBridgeHandle {
         let worker = thread::Builder::new()
             .name("dwc-oink-bridge".to_string())
             .spawn(move || {
-                worker_loop(pipe_name, rx, worker_connected, worker_policy, on_connected_changed);
+                worker_loop(
+                    pipe_name,
+                    rx,
+                    worker_connected,
+                    worker_policy,
+                    on_connected_changed,
+                    on_window_drag_changed,
+                );
             })
             .ok();
 
@@ -343,6 +377,8 @@ struct PipeClient {
     handle: windows_sys::Win32::Foundation::HANDLE,
     rx_buf: String,
     active_drag_hwnd: Option<u64>,
+    active_drag_synthetic: bool,
+    last_sent_rect: Option<WindowRect>,
 }
 
 #[cfg(windows)]
@@ -372,6 +408,8 @@ impl PipeClient {
                 handle,
                 rx_buf: String::new(),
                 active_drag_hwnd: None,
+                active_drag_synthetic: false,
+                last_sent_rect: None,
             })
         }
     }
@@ -472,6 +510,7 @@ fn worker_loop(
     connected: Arc<AtomicBool>,
     policy_store: Arc<Mutex<DwcPolicy>>,
     on_connected_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    on_window_drag_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 ) {
     let pipe_wide = encode_wide_nul(&pipe_name);
     let set_conn = |state: bool| {
@@ -479,6 +518,15 @@ fn worker_loop(
             && let Some(cb) = &on_connected_changed
         {
             cb(state);
+        }
+    };
+    let mut drag_active_state = false;
+    let mut set_drag_active = |active: bool| {
+        if drag_active_state != active {
+            drag_active_state = active;
+            if let Some(cb) = &on_window_drag_changed {
+                cb(active);
+            }
         }
     };
 
@@ -490,6 +538,7 @@ fn worker_loop(
                 set_conn(true);
                 client = Some(pipe);
             } else {
+                set_drag_active(false);
                 set_conn(false);
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(WorkerCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -502,8 +551,68 @@ fn worker_loop(
             && !pipe.drain_policies(&policy_store)
         {
             client = None;
+            set_drag_active(false);
             set_conn(false);
             continue;
+        }
+
+        let live_drag = query_active_dragged_window();
+        if let Some(pipe) = &mut client {
+            if let Some(prev_hwnd) = pipe.active_drag_hwnd
+                && !pipe.active_drag_synthetic
+            {
+                let edge = policy_store.lock().unwrap_or_else(|e| e.into_inner()).shared_edge;
+                match live_drag {
+                    Some((cur_hwnd, cur_rect)) if cur_hwnd == prev_hwnd => {
+                        if pipe.last_sent_rect != Some(cur_rect) {
+                            let (cx, cy) = query_cursor_pos();
+                            let ev = DwcBridgeEvent {
+                                kind: DwcEventKind::DragMove,
+                                hwnd: cur_hwnd,
+                                edge,
+                                window_rect: cur_rect,
+                                cursor_x: cx,
+                                cursor_y: cy,
+                                velocity_x: 0.0,
+                                velocity_y: 0.0,
+                                dnd_push: true,
+                                dragging: true,
+                            };
+                            if pipe.write_event(&ev) {
+                                pipe.last_sent_rect = Some(cur_rect);
+                            } else {
+                                client = None;
+                                set_drag_active(false);
+                                set_conn(false);
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        pipe.active_drag_hwnd = None;
+                        pipe.last_sent_rect = None;
+                        let ev = DwcBridgeEvent {
+                            kind: DwcEventKind::DragEnd,
+                            hwnd: prev_hwnd,
+                            edge,
+                            window_rect: WindowRect::default(),
+                            cursor_x: 0,
+                            cursor_y: 0,
+                            velocity_x: 0.0,
+                            velocity_y: 0.0,
+                            dnd_push: false,
+                            dragging: false,
+                        };
+                        if !pipe.write_event(&ev) {
+                            client = None;
+                            set_drag_active(false);
+                            set_conn(false);
+                            continue;
+                        }
+                    }
+                }
+            }
+            set_drag_active(live_drag.is_some() || pipe.active_drag_synthetic);
         }
 
         match rx.recv_timeout(Duration::from_millis(25)) {
@@ -520,6 +629,9 @@ fn worker_loop(
                         pipe.active_drag_hwnd = Some(hwnd);
                         DwcEventKind::DragBezelCross
                     };
+                    pipe.active_drag_synthetic = false;
+                    pipe.last_sent_rect = Some(rect);
+                    set_drag_active(true);
                     let ev = DwcBridgeEvent {
                         kind,
                         hwnd,
@@ -534,6 +646,7 @@ fn worker_loop(
                     };
                     if !pipe.write_event(&ev) {
                         client = None;
+                        set_drag_active(false);
                         set_conn(false);
                     }
                 }
@@ -548,6 +661,9 @@ fn worker_loop(
                 if let Some(pipe) = &mut client {
                     let edge = policy_store.lock().unwrap_or_else(|e| e.into_inner()).shared_edge;
                     pipe.active_drag_hwnd = Some(hwnd);
+                    pipe.active_drag_synthetic = true;
+                    pipe.last_sent_rect = Some(rect);
+                    set_drag_active(true);
                     let ev = DwcBridgeEvent {
                         kind: DwcEventKind::DragBezelCross,
                         hwnd,
@@ -562,14 +678,19 @@ fn worker_loop(
                     };
                     if !pipe.write_event(&ev) {
                         client = None;
+                        set_drag_active(false);
                         set_conn(false);
                     }
                 }
             }
             Ok(WorkerCmd::Unprobe) => {
+                let current_drag = query_active_dragged_window();
                 if let Some(pipe) = &mut client
+                    && (pipe.active_drag_synthetic || current_drag.is_none())
                     && let Some(hwnd) = pipe.active_drag_hwnd.take()
                 {
+                    pipe.active_drag_synthetic = false;
+                    pipe.last_sent_rect = None;
                     let edge = policy_store.lock().unwrap_or_else(|e| e.into_inner()).shared_edge;
                     let ev = DwcBridgeEvent {
                         kind: DwcEventKind::DragEnd,
@@ -583,8 +704,10 @@ fn worker_loop(
                         dnd_push: false,
                         dragging: false,
                     };
+                    set_drag_active(current_drag.is_some());
                     if !pipe.write_event(&ev) {
                         client = None;
+                        set_drag_active(false);
                         set_conn(false);
                     }
                 }
@@ -592,6 +715,7 @@ fn worker_loop(
         }
     }
 
+    set_drag_active(false);
     set_conn(false);
 }
 
@@ -602,6 +726,7 @@ fn worker_loop(
     connected: Arc<AtomicBool>,
     _policy_store: Arc<Mutex<DwcPolicy>>,
     _on_connected_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    _on_window_drag_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 ) {
     connected.store(false, Ordering::Release);
     while let Ok(cmd) = rx.recv() {
@@ -752,5 +877,107 @@ mod tests {
         assert!(lines[0].contains("\"type\":\"drag_bezel_cross\""));
         assert!(lines[0].contains("\"hwnd\":\"0xbeef\""));
         assert!(lines[1].contains("\"type\":\"drag_end\""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn window_drag_callback_stays_false_when_idle_and_toggles_only_on_drag() {
+        use std::ptr;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile};
+        use windows_sys::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let pipe_name = r"\\.\pipe\dwc-oink-bridge-drag-cb-test";
+        let pipe_wide = encode_wide_nul(pipe_name);
+
+        // SAFETY: Valid UTF-16 pipe name with standard duplex byte-stream server parameters.
+        let srv = unsafe {
+            CreateNamedPipeW(
+                pipe_wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                8192,
+                8192,
+                0,
+                ptr::null(),
+            )
+        };
+        assert_ne!(srv, INVALID_HANDLE_VALUE);
+
+        let srv_addr = srv as usize;
+        let server_thread = thread::spawn(move || {
+            let h = srv_addr as windows_sys::Win32::Foundation::HANDLE;
+            // SAFETY: `h` is exclusively moved into this server thread.
+            let _ = unsafe { ConnectNamedPipe(h, ptr::null_mut()) };
+            let mut collected = String::new();
+            let mut buf = [0_u8; 2048];
+            while collected.matches('\n').count() < 2 {
+                let mut nread: u32 = 0;
+                // SAFETY: `h` is connected and `buf` is uniquely borrowed.
+                let ok = unsafe { ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut nread, ptr::null_mut()) };
+                if ok == 0 || nread == 0 {
+                    break;
+                }
+                collected.push_str(&String::from_utf8_lossy(&buf[..nread as usize]));
+            }
+            // SAFETY: Disconnect and close server pipe handle at test completion.
+            unsafe {
+                DisconnectNamedPipe(h);
+                CloseHandle(h);
+            }
+        });
+
+        let drag_transitions: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let drag_cb = Arc::clone(&drag_transitions);
+        let handle = DwcBridgeHandle::start_with_callbacks(
+            pipe_name,
+            None,
+            Some(Arc::new(move |dragging| {
+                drag_cb.lock().unwrap().push(dragging);
+            })),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !handle.is_connected() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(handle.is_connected());
+        thread::sleep(Duration::from_millis(80));
+        assert!(
+            drag_transitions.lock().unwrap().is_empty(),
+            "connecting pipe while idle must NOT activate window-drag bridge"
+        );
+
+        handle.notify_window_drag(
+            0xCAFE,
+            WindowRect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 600,
+            },
+            2560,
+            300,
+            true,
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while *drag_transitions.lock().unwrap() != [true] && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*drag_transitions.lock().unwrap(), [true]);
+
+        handle.notify_unprobe();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while *drag_transitions.lock().unwrap() != [true, false] && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*drag_transitions.lock().unwrap(), [true, false]);
+
+        let _ = server_thread.join();
+        drop(handle);
     }
 }
